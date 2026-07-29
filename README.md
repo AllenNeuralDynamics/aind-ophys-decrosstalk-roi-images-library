@@ -1,6 +1,3 @@
-# DEPRECATION NOTICE!
-We are deprecating aind-ophys-decrosstalk-roi-images-library repository.  Please use the new [python library template](https://github.com/AllenNeuralDynamics/python-templates) that conforms to the latest coding standards.
-
 # aind-ophys-decrosstalk-roi-images-library
 
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
