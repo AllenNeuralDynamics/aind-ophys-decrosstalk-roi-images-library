@@ -10,7 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [ '3.10', '3.11', '3.12' ]
+        # 3.10 only: suite2p==0.14.3 cannot be imported on 3.11+ (see the
+        # requires-python note in pyproject.toml). Matches the capsule runtime.
+        python-version: [ '3.10' ]
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python ${{ matrix.python-version }}

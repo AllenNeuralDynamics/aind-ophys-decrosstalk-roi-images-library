@@ -4,9 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aind-ophys-decrosstalk-roi-images-library"
-description = "Generated from aind-library-template"
+description = "Paired-plane crosstalk removal for AIND population ophys"
 license = "MIT"
-requires-python = ">=3.10"
+# Pinned to 3.10 by suite2p==0.14.3 (see the dependency comment): its
+# detection/stats.py gives a frozen dataclass field an ndarray default, and
+# from Python 3.11 dataclasses reject any default whose class sets
+# ``__hash__ = None``. Verified: imports on 3.10, raises on 3.11 and 3.12.
+# The Code Ocean capsule runs 3.10, as do the sibling ophys capsules.
+requires-python = ">=3.10,<3.11"
 authors = [
     {name = "Allen Institute for Neural Dynamics"}
 ]
@@ -16,7 +21,45 @@ classifiers = [
 readme = "README.md"
 version = "0.0.0"
 
+# The library is the single source of dependency truth: the capsule's Code
+# Ocean environment installs only this package, pinned to a commit, and pip
+# resolves the tree below transitively.
+#
+# The compute pins affect numerical output, so they are held at the versions
+# the v1 capsule ran with: this branch is a schema/logging upgrade, not an
+# algorithm change. Two pins were checked against their newer alternatives
+# rather than assumed:
+#
+# - suite2p stays at 0.14.3 even though aind-ophys-motion-correction now runs
+#   0.14.6. The only module used here is suite2p.registration.nonrigid (for
+#   re-applying the paired plane's transforms) and it is byte-identical across
+#   0.14.3/0.14.4/0.14.5/0.14.6, while 0.14.6 requires cellpose>=4.0.1 — a
+#   two-major-version jump that removes the models.Cellpose(model_type=...)
+#   API and would change the ROI masks the coefficients are fitted on.
+#   0.14.6 is also the release that fixes suite2p's Python 3.11+ import, which
+#   is why requires-python is capped at <3.11 above. Dropping cellpose (as the
+#   speed-up branch does) is what would let both caps be lifted.
+# - scikit-image is NOT held at the v1 capsule's 0.21.0. That version has no
+#   cp312 wheel (CI tests 3.12) and aind-ophys-utils>=0.2.0 requires >=0.24.
+#   The only function used, metrics.normalized_mutual_information, is
+#   numerically identical in 0.21.0 and 0.26.0 (formatting-only diff), so the
+#   bump does not move the fitted coefficients.
 dependencies = [
+    "aind-data-schema==2.8.1",
+    "aind-data-schema-models==5.7.3",
+    "aind-qcportal-schema>=0.6.4",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@ad94805247b21a55c8e4bc03eda3f9650b41240d",
+    "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
+    "aind-ophys-utils>=0.2.0",
+    "cellpose==2.2.3",
+    "suite2p==0.14.3",
+    "numpy<2",
+    "pandas",
+    "h5py",
+    "matplotlib",
+    "pytz",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.8.1",
 ]
 
 [dependency-groups]
@@ -55,8 +98,17 @@ exclude = '''
 )
 '''
 
+# decrosstalk.py / paired_plane_registration.py / job.py are the compute and
+# orchestration layers: exercising them needs real movies, cellpose weights and
+# suite2p, so they are covered by the Code Ocean data run rather than unit
+# tests. The light modules below them are held at 100%.
 [tool.coverage.run]
-omit = ["*__init__*"]
+omit = [
+    "*__init__*",
+    "*/decrosstalk.py",
+    "*/paired_plane_registration.py",
+    "*/job.py",
+]
 source = ["aind_ophys_decrosstalk_roi_images_library", "tests"]
 
 [tool.coverage.report]

@@ -7,3 +7,5 @@ exclude =
     venv, 
     .conda
 max-complexity = 10
+# E203 is black's slice style (``a[i : j]``); pycodestyle disagrees with it.
+extend-ignore = E203
