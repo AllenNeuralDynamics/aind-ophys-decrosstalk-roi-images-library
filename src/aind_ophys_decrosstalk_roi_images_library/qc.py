@@ -48,7 +48,6 @@ def build_decrosstalk_metric(
             "the paired-plane signal has been removed without introducing "
             "artifacts."
         ),
-        value="Reasonable",
     )
 
 

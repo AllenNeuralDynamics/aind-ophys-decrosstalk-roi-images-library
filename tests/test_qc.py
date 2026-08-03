@@ -35,12 +35,18 @@ class TestDecrosstalkMetric(unittest.TestCase):
             self.metric.value.options, ["Reasonable", "Unreasonable"]
         )
         self.assertEqual(self.metric.value.status, [Status.PASS, Status.FAIL])
-        self.assertEqual(self.metric.value.value, "Reasonable")
 
     def test_awaits_review(self):
-        """The metric lands in the reviewer queue rather than auto-passing."""
+        """The metric lands in the reviewer queue rather than auto-passing.
+
+        The empty value is what makes that true. qcportal treats "" as
+        pending; a preselected option renders as already answered, so a
+        reviewer would skip it -- and "Reasonable" maps to Status.PASS,
+        which would have auto-passed the review it exists to request.
+        """
         self.assertEqual(len(self.metric.status_history), 1)
         self.assertEqual(self.metric.status_history[0].status, Status.PENDING)
+        self.assertEqual(self.metric.value.value, "")
 
 
 class TestQualityControlDocument(unittest.TestCase):

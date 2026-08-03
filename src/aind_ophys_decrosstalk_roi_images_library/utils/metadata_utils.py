@@ -254,6 +254,7 @@ def build_data_process(
     input_data: Optional[List[str]] = None,
     output_path: Optional[str] = None,
     output_parameters: Optional[dict] = None,
+    plane_id: Optional[str] = None,
     error: Optional[BaseException] = None,
 ) -> DataProcess:
     """Construct a v2 DataProcess for decrosstalk.
@@ -274,6 +275,10 @@ def build_data_process(
     output_parameters : dict, optional
         Actual parameters used and output metrics (the fitted mixing
         coefficients).
+    plane_id : str, optional
+        Plane/FOV id this document describes. Decrosstalk runs per plane
+        PAIR but writes one document per plane, so this is the individual
+        plane id -- never the pair id, which would collide within a task.
     error : Exception, optional
         The exception that terminated the run, or ``None`` on success. The
         message is recorded in ``notes``.
@@ -297,6 +302,7 @@ def build_data_process(
     )
     return shared_processing.build_data_process(
         process_type=ProcessName.VIDEO_PLANE_DECROSSTALK,
+        plane_id=plane_id,
         code=code,
         start_time=start_time.astimezone(_SEATTLE_TZ),
         end_time=end_time.astimezone(_SEATTLE_TZ),
