@@ -295,6 +295,12 @@ def _epoch_start_frames(
     Half an epoch is skipped at each end so the projections avoid the
     laser-settling frames at the start and any truncation at the end.
 
+    A movie shorter than one requested epoch still yields a single epoch,
+    with ``num_frames`` shrunk to the available interval. Debug runs truncate
+    movies to ~100 frames against a 300-1000 frame epoch, so treating that as
+    an error rather than a shorter epoch made the whole capsule unrunnable in
+    debug mode.
+
     Parameters
     ----------
     data_length : int
@@ -307,21 +313,21 @@ def _epoch_start_frames(
     Returns
     -------
     tuple
-        ``(start_frames, num_frames)``, with ``num_frames`` reduced to fit.
+        ``(start_frames, num_frames)``, with ``num_frames`` reduced to fit
+        and never below 1.
 
     Raises
     ------
     ValueError
-        If the movie is too short for even one epoch.
+        If the movie has no frames at all.
     """
-    num_epochs = min(max_num_epochs, data_length // num_frames)
-    if num_epochs < 1:
+    if data_length < 1:
         raise ValueError(
-            f"Movie has {data_length} frames, too few for one epoch of "
-            f"{num_frames} frames."
+            f"Movie has {data_length} frames; nothing to project."
         )
+    num_epochs = max(1, min(max_num_epochs, data_length // num_frames))
     epoch_interval = data_length // (num_epochs + 1)
-    num_frames = min(num_frames, epoch_interval)
+    num_frames = max(1, min(num_frames, epoch_interval))
     start_frames = [
         num_frames // 2 + i * epoch_interval for i in range(num_epochs)
     ]
