@@ -3,32 +3,27 @@
 A thin, capsule-specific layer over the shared ``aind_pophys_metadata``
 library. The v1/v2 dict paths, schema-version dispatch, and the ``Processing``
 builders live in the shared library; this module assembles the
-``DecrosstalkMetadata`` view, its capsule-specific ``DataProcess``, and the
-reader for the upstream motion-correction parameters that paired-plane
-registration has to reproduce.
+``DecrosstalkMetadata`` view, this capsule's ``Code`` identity, and the reader
+for the upstream motion-correction parameters that paired-plane registration
+has to reproduce.
 """
 
 import logging
-import os
 from dataclasses import dataclass
-from datetime import datetime as dt
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import pytz
-from aind_data_schema.core.processing import DataProcess, Processing
+from aind_data_schema.components.identifiers import Code
 from aind_data_schema_models.process_names import ProcessName
 from aind_pophys_metadata import fields, io
 from aind_pophys_metadata import processing as shared_processing
 
 logger = logging.getLogger(__name__)
 
-_SEATTLE_TZ = pytz.timezone("America/Los_Angeles")
+CODE_NAME = "aind-ophys-decrosstalk-roi-images"
+LIBRARY_NAME = "aind-ophys-decrosstalk-roi-images-library"
 
-CODE_URL = (
-    "https://github.com/AllenNeuralDynamics/"
-    "aind-ophys-decrosstalk-roi-images/tree/main/code"
-)
+PROCESS_TYPE = ProcessName.VIDEO_PLANE_DECROSSTALK
 
 PROCESSING_JSON = "processing.json"
 V1_DATA_PROCESS_GLOB = "*data_process.json"
@@ -42,28 +37,39 @@ class DecrosstalkMetadata:
     """Minimal metadata the decrosstalk capsule consumes.
 
     ``frame_rate`` is used only to size the debug truncation; the remaining
-    fields are identifiers used for logging and provenance.
+    fields are identifiers used for logging, provenance and the plane-id
+    cross-check.
     """
 
     frame_rate: Optional[float] = None
     instrument_id: Optional[str] = None
     subject_id: Optional[str] = None
     dataset_name: Optional[str] = None
+    fov_ids: Tuple[str, ...] = ()
 
 
-def load_decrosstalk_metadata(input_dir: Path) -> DecrosstalkMetadata:
+def load_decrosstalk_metadata(
+    input_dir: Path,
+    cli_frame_rate: Optional[float] = None,
+    require_frame_rate: bool = False,
+) -> DecrosstalkMetadata:
     """Read v1/v2 metadata for decrosstalk from ``input_dir``.
 
-    Dispatches on which core file is present (``acquisition.json`` -> v2,
-    ``session.json`` -> v1). ``frame_rate`` falls back to ``platform.json``
-    when the core file lacks it. ``subject_id`` is read from the core file
-    (canonical) and falls back to ``subject.json``. ``dataset_name`` comes
-    from ``data_description.json``.
+    The core-file location, schema-version dispatch and sibling loads all come
+    from the shared ``load_common`` preamble. ``frame_rate`` falls back to
+    ``platform.json`` and then to ``cli_frame_rate``; it is only fatal when
+    ``require_frame_rate`` is set, since decrosstalk needs a rate solely to
+    size the debug truncation.
 
     Parameters
     ----------
     input_dir : Path
         Directory searched recursively for the metadata files.
+    cli_frame_rate : float, optional
+        Operator-supplied frame rate, used when the metadata supplies none.
+    require_frame_rate : bool, optional
+        Raise when no source supplies a frame rate. Set in debug mode, where
+        the truncation cannot be sized without one.
 
     Returns
     -------
@@ -75,26 +81,96 @@ def load_decrosstalk_metadata(input_dir: Path) -> DecrosstalkMetadata:
     FileNotFoundError
         If neither ``acquisition.json`` nor ``session.json`` is found.
     ValueError
-        If both core files are present (ambiguous input).
+        If both core files are present (ambiguous input), or if
+        ``require_frame_rate`` and no source supplies one.
     """
     input_dir = Path(input_dir)
-    core_path = io.find_acquisition_file(input_dir)
-    version = io.detect_schema_version(core_path)
-    core_raw = io.load_json(core_path)
-
-    platform_path = io.find(input_dir, "platform.json")
-    platform_raw = io.load_json(platform_path) if platform_path else None
-    subject_path = io.find(input_dir, "subject.json")
-    subject_raw = io.load_json(subject_path) if subject_path else None
-    dd_path = io.find(input_dir, "data_description.json")
-    dd_raw = io.load_json(dd_path) if dd_path else None
-
+    common = io.load_common(input_dir)
     return DecrosstalkMetadata(
-        frame_rate=fields.get_frame_rate(version, core_raw, platform_raw),
-        instrument_id=fields.get_instrument_id(version, core_raw),
-        subject_id=fields.get_subject_id(core_raw, subject_raw),
-        dataset_name=fields.get_dataset_name(dd_raw),
+        frame_rate=fields.resolve_frame_rate(
+            common.version,
+            common.core_raw,
+            common.platform_raw,
+            core_file=common.core_path,
+            input_dir=input_dir,
+            cli_override=cli_frame_rate,
+            required=require_frame_rate,
+        ),
+        instrument_id=fields.get_instrument_id(
+            common.version, common.core_raw
+        ),
+        subject_id=fields.get_subject_id(
+            common.core_raw, common.subject_raw
+        ),
+        dataset_name=fields.get_dataset_name(common.data_description_raw),
+        fov_ids=fields.get_fov_ids(common.version, common.core_raw),
     )
+
+
+def validate_pair_ids(
+    scavenged: Iterable[str],
+    canonical: Iterable[str],
+) -> bool:
+    """Warn when a pair's directory-scavenged plane ids are not canonical.
+
+    Decrosstalk scavenges its two plane ids from the staged ``pair*/<id>``
+    directory names. It sees one pair out of the session's planes, so the
+    canonical set is compared *restricted to that pair*: a whole-session
+    comparison would report a divergence on every multiplane run, which is
+    noise rather than signal. An id absent from the canonical set survives the
+    restriction and is what the warning names.
+
+    Never raises: uniqueness is the hard requirement and the directory names
+    already guarantee it, so canonicality only buys readability.
+
+    Parameters
+    ----------
+    scavenged : iterable of str
+        The pair's plane ids, taken from the input directory layout.
+    canonical : iterable of str
+        Every canonical plane id of the session (see
+        :func:`aind_pophys_metadata.fields.get_fov_ids`).
+
+    Returns
+    -------
+    bool
+        ``True`` when the scavenged ids are all canonical, or when the
+        metadata yielded no canonical ids to compare against.
+    """
+    scavenged = list(scavenged)
+    canonical = list(canonical)
+    if not canonical:
+        logger.warning(
+            "No canonical plane ids in the acquisition metadata; keeping the "
+            "scavenged ids %s unchecked.",
+            sorted(scavenged),
+        )
+        return True
+    expected = [name for name in canonical if name in set(scavenged)]
+    return fields.validate_scavenged_ids(scavenged, expected, logger)
+
+
+def process_name(plane_id: Optional[str]) -> Optional[str]:
+    """Return the ``DataProcess.name`` this capsule emits for one plane.
+
+    Mirrors the composition ``build_data_process`` performs, so a document
+    can exclude itself from its own dependency graph before the process is
+    built.
+
+    Parameters
+    ----------
+    plane_id : str or None
+        Plane/FOV id, or ``None`` when no plane was resolved.
+
+    Returns
+    -------
+    str or None
+        The composed process name, or ``None`` without a plane id (the
+        schema then derives the name from the process type).
+    """
+    if not plane_id:
+        return None
+    return f"{plane_id}: {PROCESS_TYPE.value}"
 
 
 def _suite2p_params_from_v2(processing_raw: dict) -> Dict[str, Any]:
@@ -247,90 +323,31 @@ def resolve_suite2p_params(
     return resolved
 
 
-def build_data_process(
+def build_code(
     parameters: dict,
-    start_time: dt,
-    end_time: dt,
     input_data: Optional[List[str]] = None,
-    output_path: Optional[str] = None,
-    output_parameters: Optional[dict] = None,
-    plane_id: Optional[str] = None,
-    error: Optional[BaseException] = None,
-) -> DataProcess:
-    """Construct a v2 DataProcess for decrosstalk.
+) -> Code:
+    """Construct the decrosstalk ``Code`` block.
+
+    Code identity comes from the backing library: the shared builder reads
+    the installed ``LIBRARY_NAME`` distribution for the version and derives
+    the url from it, so the two always describe one artifact.
 
     Parameters
     ----------
     parameters : dict
-        Capsule configuration parameters (from DecrosstalkSettings, plus the
-        resolved upstream suite2p settings).
-    start_time : dt
-        Processing start time.
-    end_time : dt
-        Processing end time.
+        Capsule configuration parameters (from ``DecrosstalkSettings``).
     input_data : list of str, optional
         Input data path(s)/asset name(s) for provenance.
-    output_path : str, optional
-        Path to this process's output directory, relative to the results root.
-    output_parameters : dict, optional
-        Actual parameters used and output metrics (the fitted mixing
-        coefficients).
-    plane_id : str, optional
-        Plane/FOV id this document describes. Decrosstalk runs per plane
-        PAIR but writes one document per plane, so this is the individual
-        plane id -- never the pair id, which would collide within a task.
-    error : Exception, optional
-        The exception that terminated the run, or ``None`` on success. The
-        message is recorded in ``notes``.
 
     Returns
     -------
-    DataProcess
-        The populated decrosstalk data process.
+    Code
+        The populated code block.
     """
-    notes = (
-        None
-        if error is None
-        else f"Run failed with {type(error).__name__}: {error}"
-    )
-    code = shared_processing.build_code(
-        url=CODE_URL,
-        name="aind-ophys-decrosstalk-roi-images",
-        version=os.getenv("VERSION", ""),
+    return shared_processing.build_code(
+        name=CODE_NAME,
+        library_name=LIBRARY_NAME,
         parameters=parameters,
         input_data=input_data,
     )
-    return shared_processing.build_data_process(
-        process_type=ProcessName.VIDEO_PLANE_DECROSSTALK,
-        plane_id=plane_id,
-        code=code,
-        start_time=start_time.astimezone(_SEATTLE_TZ),
-        end_time=end_time.astimezone(_SEATTLE_TZ),
-        output_path=output_path,
-        output_parameters=output_parameters,
-        notes=notes,
-        resources=shared_processing.resource_usage(),
-    )
-
-
-def build_processing(data_processes: List[DataProcess]) -> Processing:
-    """Wrap data processes into a full v2 Processing object."""
-    return shared_processing.build_processing(data_processes)
-
-
-def write_processing_json(processing: Processing, output_dir: Path) -> Path:
-    """Serialize a Processing object to ``processing.json``.
-
-    Parameters
-    ----------
-    processing : Processing
-        The processing document to write.
-    output_dir : Path
-        Directory into which ``processing.json`` is written.
-
-    Returns
-    -------
-    Path
-        The path written.
-    """
-    return shared_processing.write_processing_json(processing, output_dir)

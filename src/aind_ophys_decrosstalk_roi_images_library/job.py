@@ -10,19 +10,21 @@ Unlike the single-plane capsules this one processes **two** planes per task, so
 it writes one metadata document into each plane's output directory (which is
 also what ``main.nf``'s ``capsule/results/*/*/processing.json`` glob expects).
 
-``processing.json`` is written from a ``finally`` block so a failed run still
-leaves a document describing what was attempted, with the error recorded in
-``notes``.
+``processing.json`` is written by the shared ``stage_guard``, one per plane, so
+a failed run still leaves a document describing what was attempted with the
+error recorded in ``notes``.
 """
 
 import logging
-from datetime import datetime as dt
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import h5py as h5
 import numpy as np
-from aind_pophys_metadata import io
+from aind_pophys_metadata import processing as shared_processing
+from aind_pophys_metadata.paths import find_one, relative_to_root
+from aind_pophys_metadata.runner import StageContext, stage_guard
 from log_schema.main import setup_logging
 
 from . import decrosstalk as dri
@@ -30,7 +32,6 @@ from . import paired_plane_registration as ppr
 from . import qc
 from .settings import DecrosstalkSettings
 from .utils import metadata_utils as mu
-from .utils.paths import relative_to_root
 
 logger = logging.getLogger("Paired plane decrosstalk")
 
@@ -132,56 +133,35 @@ def _truncate_for_debug(
     Path
         Path to the truncated copy.
     """
-    n_frames = int(duration_s * float(frame_rate))
-    logger.info(
-        "Debug mode: truncating %s to %s frames (%.0f s at %.3f Hz)",
-        h5_file.name,
-        n_frames,
-        duration_s,
-        frame_rate,
-    )
+    requested = int(duration_s * float(frame_rate))
     with h5.File(h5_file, "r") as f:
+        available = f["data"].shape[0]
+        # The slice clips silently, so log what is actually retained: the
+        # converter caps every plane's movie in a debug run, which left the
+        # logged target off by up to 38x from the frames really processed.
+        n_frames = min(requested, available)
+        if requested > available:
+            logger.warning(
+                "Debug mode: %s holds %s frames, fewer than the %s requested "
+                "(%.0f s at %.3f Hz) - movie already shorter than the debug "
+                "target, upstream debug cap in effect.",
+                h5_file.name,
+                available,
+                requested,
+                duration_s,
+                frame_rate,
+            )
+        logger.info(
+            "Debug mode: truncating %s to %s of %s frames",
+            h5_file.name,
+            n_frames,
+            available,
+        )
         data = f["data"][:n_frames]
     truncated = Path(tmp_dir) / h5_file.name
     with h5.File(truncated, "w") as f:
         f.create_dataset("data", data=data)
     return truncated
-
-
-def _resolve_debug_frame_rate(
-    metadata: mu.DecrosstalkMetadata, settings: DecrosstalkSettings
-) -> float:
-    """Resolve the frame rate needed to size the debug truncation.
-
-    Parameters
-    ----------
-    metadata : mu.DecrosstalkMetadata
-        Metadata read at the start of the run.
-    settings : DecrosstalkSettings
-        Parsed settings, providing the CLI fallback.
-
-    Returns
-    -------
-    float
-        The resolved frame rate [Hz].
-
-    Raises
-    ------
-    ValueError
-        If neither the metadata nor the CLI supplies one.
-    """
-    frame_rate = metadata.frame_rate
-    if frame_rate is None:
-        frame_rate = settings.frame_rate
-        logger.warning(
-            "Using CLI fallback frame rate: %s", settings.frame_rate
-        )
-    if frame_rate is None:
-        raise ValueError(
-            "debug mode needs a frame rate to size the truncation, and it "
-            "could not be resolved from metadata or --frame_rate"
-        )
-    return frame_rate
 
 
 def _prepare_cached_paired_movie(
@@ -220,14 +200,8 @@ def _prepare_cached_paired_movie(
         If the raw movie or the paired motion transform is missing.
     """
     input_dir = Path(settings.input_dir).resolve()
-    raw_movie = io.find(input_dir, f"{oeid}.h5")
-    if raw_movie is None:
-        raise FileNotFoundError(f"Could not find raw movie {oeid}.h5")
-    motion_csv = io.find(input_dir, f"{paired_oeid}_motion_transform.csv")
-    if motion_csv is None:
-        raise FileNotFoundError(
-            f"Could not find {paired_oeid}_motion_transform.csv"
-        )
+    raw_movie = find_one(input_dir, f"{oeid}.h5")
+    motion_csv = find_one(input_dir, f"{paired_oeid}_motion_transform.csv")
 
     non_rigid = suite2p_params["nonrigid"]
     transform_df = ppr.get_s2p_motion_transform(
@@ -237,7 +211,7 @@ def _prepare_cached_paired_movie(
         raw_movie = _truncate_for_debug(
             raw_movie,
             settings.tmp_dir,
-            _resolve_debug_frame_rate(metadata, settings),
+            metadata.frame_rate,
             settings.debug_duration_s,
         )
         with h5.File(raw_movie, "r") as f:
@@ -349,7 +323,7 @@ def _decrosstalk_plane(
     paired_movie: Path,
     paired_emf: Path,
     suite2p_params: dict,
-    plane_ctx: dict,
+    plane_ctx: StageContext,
 ) -> None:
     """Fit and apply the mixing coefficients for a single plane.
 
@@ -371,15 +345,12 @@ def _decrosstalk_plane(
         Episodic mean FOV of ``paired_movie``.
     suite2p_params : dict
         Resolved upstream ``nonrigid`` / ``block_size``.
-    plane_ctx : dict
-        Populated in place so the ``processing.json`` writer can report
-        partial provenance even when this raises.
+    plane_ctx : StageContext
+        Populated in place so the ``processing.json`` the stage guard writes
+        reports partial provenance even when this raises.
     """
     num_frames = settings.resolved_num_frames()
     signal_movie = _registered_movie(pair_dir, oeid)
-    plane_ctx["input_data"] = [
-        relative_to_root(Path(settings.input_dir).resolve(), signal_movie)
-    ]
 
     signal_emf = ppr.episodic_mean_fov(
         signal_movie,
@@ -415,7 +386,10 @@ def _decrosstalk_plane(
         alpha,
         beta,
     )
-    plane_ctx["output_parameters"] = {
+    # The resolved upstream suite2p settings ride here rather than in
+    # code.parameters: they are read from the upstream document during the
+    # run, after the Code block the stage guard was entered with.
+    plane_ctx.output_parameters = {
         "alpha_mean": round(alpha, 4),
         "beta_mean": round(beta, 4),
         "num_epochs": len(alpha_list),
@@ -480,13 +454,13 @@ def _write_quality_control(
 def _run_decrosstalk_pair(
     settings: DecrosstalkSettings,
     metadata: mu.DecrosstalkMetadata,
-    ctx: dict,
+    pair_dir: Path,
+    oeids: Tuple[str, str],
+    output_dirs: Dict[str, Path],
+    contexts: Dict[str, StageContext],
+    cached_movies: Dict[str, Path],
 ) -> None:
     """Decrosstalk both planes of the staged pair.
-
-    ``ctx["planes"]`` is populated as the run progresses so the
-    ``processing.json`` writer in ``run()``'s ``finally`` can report partial
-    provenance even when this raises.
 
     Parameters
     ----------
@@ -494,23 +468,21 @@ def _run_decrosstalk_pair(
         Parsed settings.
     metadata : mu.DecrosstalkMetadata
         Metadata read at the start of the run.
-    ctx : dict
-        Run context accumulated for the metadata writer.
+    pair_dir : Path
+        Directory holding both planes' staged input.
+    oeids : tuple of str
+        The pair's two plane ids.
+    output_dirs : dict of str to Path
+        Each plane's output directory.
+    contexts : dict of str to StageContext
+        Each plane's stage context, populated as the run progresses so the
+        emitted document reports partial provenance even when this raises.
+    cached_movies : dict of str to Path
+        Populated in place with the large paired-registered intermediates so
+        the caller can delete them however the run ends.
     """
-    results_root = Path(settings.output_dir).resolve()
-    input_dir = Path(settings.input_dir).resolve()
+    oeid1, oeid2 = oeids
     Path(settings.tmp_dir).mkdir(parents=True, exist_ok=True)
-
-    pair_dir, (oeid1, oeid2) = _locate_pair(input_dir)
-    logger.info("Decrosstalking pair %s / %s from %s", oeid1, oeid2, pair_dir)
-
-    output_dirs = {
-        oeid: _make_output_dir(results_root, oeid) for oeid in (oeid1, oeid2)
-    }
-    ctx["planes"] = [
-        {"oeid": oeid, "output_dir": output_dirs[oeid]}
-        for oeid in (oeid1, oeid2)
-    ]
 
     # Both planes were registered by the same upstream motion-correction run,
     # so one read supplies the settings for the pair.
@@ -521,7 +493,6 @@ def _run_decrosstalk_pair(
         nonrigid_override=settings.nonrigid,
         block_size_override=settings.block_size_override(),
     )
-    ctx["suite2p_params"] = suite2p_params
     logger.info("Upstream suite2p parameters: %s", suite2p_params)
 
     # cached_movies[X] is plane X's *raw* movie warped by the *other* plane's
@@ -529,7 +500,6 @@ def _run_decrosstalk_pair(
     # frame of reference. So decrosstalking plane P consumes
     # cached_movies[partner-of-P]. Its episodic mean FOV is written into X's
     # own output directory, matching the established results layout.
-    cached_movies: Dict[str, Path] = {}
     cached_emf: Dict[str, Path] = {}
     for oeid, paired_oeid in ((oeid1, oeid2), (oeid2, oeid1)):
         cached_movies[oeid] = _prepare_cached_paired_movie(
@@ -541,11 +511,8 @@ def _run_decrosstalk_pair(
             max_num_epochs=settings.max_num_epochs,
             num_frames=settings.resolved_num_frames(),
         )
-    ctx["cached_movies"] = list(cached_movies.values())
 
-    for plane_ctx, (oeid, paired_oeid) in zip(
-        ctx["planes"], ((oeid1, oeid2), (oeid2, oeid1))
-    ):
+    for oeid, paired_oeid in ((oeid1, oeid2), (oeid2, oeid1)):
         _decrosstalk_plane(
             settings,
             pair_dir,
@@ -555,19 +522,19 @@ def _run_decrosstalk_pair(
             cached_movies[paired_oeid],
             cached_emf[paired_oeid],
             suite2p_params,
-            plane_ctx,
+            contexts[oeid],
         )
 
 
-def _cleanup_cached_movies(ctx: dict) -> None:
+def _cleanup_cached_movies(cached_movies: Iterable[Path]) -> None:
     """Delete the large paired-registered intermediates. Never raises.
 
     Parameters
     ----------
-    ctx : dict
-        Run context; ``ctx["cached_movies"]`` lists the files to remove.
+    cached_movies : iterable of Path
+        The intermediates to remove.
     """
-    for cached_movie in ctx.get("cached_movies") or []:
+    for cached_movie in cached_movies:
         try:
             Path(cached_movie).unlink(missing_ok=True)
             logger.info("Removed intermediate %s", cached_movie)
@@ -575,59 +542,57 @@ def _cleanup_cached_movies(ctx: dict) -> None:
             logger.warning("Could not remove %s: %s", cached_movie, exc)
 
 
-def _write_processing_metadata(
+def _enter_stage_guard(
+    stack: ExitStack,
     settings: DecrosstalkSettings,
-    ctx: dict,
-    start_time: dt,
-    error: Optional[BaseException],
-) -> None:
-    """Best-effort writer for each plane's processing.json. Never raises.
+    output_dir: Path,
+    plane_id: Optional[str],
+    input_data: Optional[List[str]] = None,
+) -> StageContext:
+    """Open one plane's stage guard on ``stack`` and return its context.
 
-    Failures here must not mask a decrosstalk failure already propagating out
-    of ``run()``. Falls back to a single document at the results root when the
-    run failed before the per-plane directories were created.
+    Every ``processing.json`` staged into this task is a flat sibling
+    upstream, so the dependency graph is collected here rather than inferred
+    from a static stage order.
 
     Parameters
     ----------
+    stack : contextlib.ExitStack
+        Stack the guard is entered on; it writes the document as the stack
+        unwinds, whether or not the run raised.
     settings : DecrosstalkSettings
-        Parsed settings.
-    ctx : dict
-        Run context accumulated by ``_run_decrosstalk_pair``.
-    start_time : dt
-        Run start time.
-    error : Exception or None
-        The exception that terminated the run, if any.
+        Parsed settings; supplies the roots and the recorded parameters.
+    output_dir : Path
+        Directory this plane's ``processing.json`` is written to.
+    plane_id : str or None
+        Plane/FOV id, or ``None`` when no plane could be resolved.
+    input_data : list of str, optional
+        Input data path(s) for provenance.
+
+    Returns
+    -------
+    StageContext
+        Handle for the run to record output parameters on.
     """
     results_root = Path(settings.output_dir).resolve()
-    parameters = {
-        **settings.model_dump(mode="json"),
-        **(ctx.get("suite2p_params") or {}),
-    }
-    planes: List[dict] = ctx.get("planes") or [
-        {"oeid": None, "output_dir": results_root}
-    ]
-    end_time = dt.now()
-    for plane_ctx in planes:
-        try:
-            output_dir = Path(plane_ctx["output_dir"])
-            data_process = mu.build_data_process(
-                parameters=parameters,
-                start_time=start_time,
-                end_time=end_time,
-                input_data=plane_ctx.get("input_data"),
-                output_path=relative_to_root(results_root, output_dir),
-                output_parameters=plane_ctx.get("output_parameters"),
-                plane_id=plane_ctx.get("oeid"),
-                error=error,
-            )
-            mu.write_processing_json(
-                mu.build_processing([data_process]), output_dir
-            )
-        except Exception as proc_exc:
-            logger.error(
-                f"processing.json write failed (non-fatal) for "
-                f"{plane_ctx.get('oeid')}: {proc_exc}"
-            )
+    input_dir = Path(settings.input_dir).resolve()
+    code = mu.build_code(
+        settings.model_dump(mode="json"), input_data=input_data
+    )
+    context = stack.enter_context(
+        stage_guard(
+            output_dir,
+            mu.PROCESS_TYPE,
+            code,
+            plane_id=plane_id,
+            logger=logger,
+            output_path=relative_to_root(results_root, output_dir),
+        )
+    )
+    context.upstream_names = shared_processing.collect_upstream_process_names(
+        input_dir, exclude=mu.process_name(plane_id)
+    )
+    return context
 
 
 def _verify_outputs(output_dir: Path) -> None:
@@ -661,9 +626,13 @@ def run(settings: Optional[DecrosstalkSettings] = None) -> None:
         through the core v2 schema objects after writing.
     """
     settings = settings or DecrosstalkSettings()
-    start_time = dt.now()
-
-    metadata = mu.load_decrosstalk_metadata(settings.input_dir)
+    # A frame rate is only needed to size the debug truncation, so it is
+    # fatal in debug mode alone.
+    metadata = mu.load_decrosstalk_metadata(
+        settings.input_dir,
+        cli_frame_rate=settings.frame_rate,
+        require_frame_rate=settings.debug,
+    )
     setup_logging(
         use_cloudwatch=True,
         model={
@@ -671,24 +640,50 @@ def run(settings: Optional[DecrosstalkSettings] = None) -> None:
             "process_name": PROCESS_NAME,
         },
     )
-    logger.info("Starting decrosstalk", extra={"event_type": "stage_start"})
 
-    ctx: dict = {}
-    run_error: Optional[BaseException] = None
-    try:
-        _run_decrosstalk_pair(settings, metadata, ctx)
-        logger.info(
-            "Decrosstalk complete", extra={"event_type": "stage_complete"}
+    results_root = Path(settings.output_dir).resolve()
+    input_dir = Path(settings.input_dir).resolve()
+    cached_movies: Dict[str, Path] = {}
+
+    with ExitStack() as stack:
+        stack.callback(_cleanup_cached_movies, cached_movies.values())
+        try:
+            pair_dir, oeids = _locate_pair(input_dir)
+        except BaseException:
+            # No plane id is known yet, so the one document this run can
+            # honestly write goes to the results root.
+            _enter_stage_guard(stack, settings, results_root, None)
+            raise
+        logger.info("Decrosstalking pair %s / %s from %s", *oeids, pair_dir)
+        mu.validate_pair_ids(oeids, metadata.fov_ids)
+
+        output_dirs = {
+            oeid: _make_output_dir(results_root, oeid) for oeid in oeids
+        }
+        contexts = {
+            oeid: _enter_stage_guard(
+                stack,
+                settings,
+                output_dirs[oeid],
+                oeid,
+                input_data=[
+                    relative_to_root(
+                        input_dir, _registered_movie(pair_dir, oeid)
+                    )
+                ],
+            )
+            for oeid in oeids
+        }
+        _run_decrosstalk_pair(
+            settings,
+            metadata,
+            pair_dir,
+            oeids,
+            output_dirs,
+            contexts,
+            cached_movies,
         )
-    except BaseException as exc:
-        run_error = exc
-        logger.error("Decrosstalk failed", extra={"event_type": "stage_error"})
-        logger.exception("Unhandled exception")
-        raise
-    finally:
-        _cleanup_cached_movies(ctx)
-        _write_processing_metadata(settings, ctx, start_time, run_error)
 
     if settings.verify:
-        for plane_ctx in ctx["planes"]:
-            _verify_outputs(plane_ctx["output_dir"])
+        for output_dir in output_dirs.values():
+            _verify_outputs(output_dir)

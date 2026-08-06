@@ -1,13 +1,11 @@
-"""Tests for the decrosstalk metadata read layer and Processing builders."""
+"""Tests for the decrosstalk metadata read layer and the Code builder."""
 
 import json
 import unittest
-from datetime import datetime, timezone
+from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
-
-from aind_data_schema.core.processing import Processing
 
 from aind_ophys_decrosstalk_roi_images_library.utils import (
     metadata_utils as mu,
@@ -64,7 +62,7 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
     """v1/v2 dispatch for the fields decrosstalk consumes."""
 
     def test_reads_v1_session(self):
-        """A v1 session.json supplies frame rate, rig and subject."""
+        """A v1 session.json supplies frame rate, rig, subject and planes."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(root, "session.json", V1_SESSION)
@@ -74,6 +72,7 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
         self.assertEqual(metadata.instrument_id, "MESO.1")
         self.assertEqual(metadata.subject_id, "999999")
         self.assertEqual(metadata.dataset_name, DATA_DESCRIPTION["name"])
+        self.assertEqual(metadata.fov_ids, ("VISp_0", "VISl_1"))
 
     def test_reads_v2_acquisition(self):
         """A v2 acquisition.json supplies the same fields."""
@@ -84,6 +83,30 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
         self.assertEqual(metadata.frame_rate, 9.48)
         self.assertEqual(metadata.instrument_id, "MESO.1")
         self.assertIsNone(metadata.dataset_name)
+
+    def test_cli_frame_rate_fills_a_rateless_asset(self):
+        """The CLI override is used when the metadata declares no rate."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "acquisition.json", {"data_streams": []})
+            metadata = mu.load_decrosstalk_metadata(root, cli_frame_rate=7.0)
+        self.assertEqual(metadata.frame_rate, 7.0)
+
+    def test_required_frame_rate_raises_when_unresolvable(self):
+        """Debug mode cannot size its truncation without a rate."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "acquisition.json", {"data_streams": []})
+            with self.assertRaises(ValueError):
+                mu.load_decrosstalk_metadata(root, require_frame_rate=True)
+
+    def test_absent_frame_rate_is_not_fatal_outside_debug(self):
+        """A rate-less asset still runs when the truncation is not needed."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "acquisition.json", {"data_streams": []})
+            metadata = mu.load_decrosstalk_metadata(root)
+        self.assertIsNone(metadata.frame_rate)
 
     def test_missing_core_file_raises(self):
         """Neither core file present is a fail-fast FileNotFoundError."""
@@ -288,79 +311,70 @@ class TestResolveSuite2pParams(unittest.TestCase):
         self.assertIn("nonrigid", message)
 
 
-class TestProcessingBuilders(unittest.TestCase):
-    """The v2 DataProcess / Processing builders."""
+class TestBuildCode(unittest.TestCase):
+    """The v2 Code block this capsule stamps onto every document."""
 
-    def setUp(self):
-        """Fix the timestamps used by every builder assertion."""
-        self.start = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
-        self.end = datetime(2026, 7, 29, 12, 5, tzinfo=timezone.utc)
+    @patch.dict("os.environ", {"VERSION": "15.0.0"}, clear=False)
+    def test_capsule_version_is_ignored(self):
+        """The backing library, not the wrapper, identifies the artifact."""
+        code = mu.build_code({"debug": False})
+        self.assertNotEqual(code.version, "15.0.0")
+        self.assertEqual(code.version, version(mu.LIBRARY_NAME))
 
-    def test_build_data_process(self):
-        """A successful run yields a decrosstalk DataProcess, no notes."""
-        data_process = mu.build_data_process(
-            parameters={"block_size": [128, 128]},
-            start_time=self.start,
-            end_time=self.end,
-            input_data=["plane_0/motion_correction/plane_0_registered.h5"],
-            output_path="plane_0/decrosstalk",
-            output_parameters={"alpha_mean": 0.1},
+    def test_version_and_url_identify_the_backing_library(self):
+        """code.version and code.url must name one artifact."""
+        code = mu.build_code({})
+        self.assertEqual(code.version, version(mu.LIBRARY_NAME))
+        self.assertIn(mu.LIBRARY_NAME, code.url)
+        # The landing page, not a branch or a subdirectory.
+        self.assertNotIn("/tree/", code.url)
+
+    def test_records_input_data(self):
+        """Input provenance is carried on the code block."""
+        code = mu.build_code(
+            {}, input_data=["plane_0/motion_correction/plane_0_registered.h5"]
         )
-        # process_type validates down to a plain str on the model.
-        self.assertEqual(data_process.process_type, "Video plane decrosstalk")
-        # output_path validates into an AssetPath (a str subclass).
-        self.assertEqual(str(data_process.output_path), "plane_0/decrosstalk")
-        self.assertIsNone(data_process.notes)
-        self.assertEqual(data_process.experimenters, [])
         self.assertEqual(
-            data_process.code.input_data[0].name,
+            code.input_data[0].name,
             "plane_0/motion_correction/plane_0_registered.h5",
         )
-        self.assertIsNotNone(data_process.resources)
 
-    def test_build_data_process_records_error(self):
-        """A failed run records the exception in notes."""
-        data_process = mu.build_data_process(
-            parameters={},
-            start_time=self.start,
-            end_time=self.end,
-            error=ValueError("bad block size"),
-        )
-        self.assertIn("ValueError", data_process.notes)
-        self.assertIn("bad block size", data_process.notes)
 
-    @patch.dict(
-        "os.environ",
-        {
-            "PIPELINE_NAME": "aind-pophys-pipeline",
-            "PIPELINE_URL": "https://example.invalid/p",
-            "PIPELINE_VERSION": "2.0.0",
-        },
-        clear=False,
-    )
-    def test_build_processing_populates_pipeline_from_env(self):
-        """pipelines and pipeline_name come from the same env read."""
-        data_process = mu.build_data_process(
-            parameters={}, start_time=self.start, end_time=self.end
-        )
-        processing = mu.build_processing([data_process])
-        self.assertEqual(len(processing.pipelines), 1)
-        self.assertEqual(
-            processing.data_processes[0].pipeline_name,
-            processing.pipelines[0].name,
-        )
+class TestPlaneIdentity(unittest.TestCase):
+    """The scavenged-vs-canonical cross-check and the process name."""
 
-    def test_write_processing_json_round_trips(self):
-        """The written document validates back as a full v2 Processing."""
-        data_process = mu.build_data_process(
-            parameters={}, start_time=self.start, end_time=self.end
-        )
-        with TemporaryDirectory() as tmp:
-            written = mu.write_processing_json(
-                mu.build_processing([data_process]), Path(tmp) / "nested"
+    def test_canonical_pair_passes_quietly(self):
+        """Two canonical ids out of a multiplane session are no divergence."""
+        self.assertTrue(
+            mu.validate_pair_ids(
+                ["VISp_0", "VISl_1"],
+                ["VISp_0", "VISl_1", "VISa_2", "VISal_3"],
             )
-            self.assertTrue(written.exists())
-            Processing.model_validate_json(written.read_text())
+        )
+
+    def test_unknown_id_warns_and_does_not_raise(self):
+        """Canonicality is cosmetic, so a divergence only warns."""
+        with self.assertLogs(mu.logger, level="WARNING") as logs:
+            result = mu.validate_pair_ids(
+                ["VISp_0", "plane_9"], ["VISp_0", "VISl_1"]
+            )
+        self.assertFalse(result)
+        self.assertIn("plane_9", "\n".join(logs.output))
+
+    def test_no_canonical_ids_warns_and_keeps_the_scavenged_pair(self):
+        """Metadata without planes leaves nothing to check against."""
+        with self.assertLogs(mu.logger, level="WARNING"):
+            self.assertTrue(mu.validate_pair_ids(["a", "b"], []))
+
+    def test_process_name_matches_the_shared_composition(self):
+        """The name used to exclude self from the dependency graph."""
+        self.assertEqual(
+            mu.process_name("VISp_0"), "VISp_0: Video plane decrosstalk"
+        )
+
+    def test_process_name_without_a_plane(self):
+        """Without a plane id the schema derives the name itself."""
+        self.assertIsNone(mu.process_name(None))
 
 
 if __name__ == "__main__":
