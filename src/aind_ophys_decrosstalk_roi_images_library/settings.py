@@ -6,7 +6,7 @@ free of cellpose / suite2p / aind-data-schema side effects.
 
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -146,9 +146,9 @@ class DecrosstalkSettings(BaseSettings, cli_parse_args=True):
     cellpose_model_type: str = Field(
         default="cyto",
         description=(
-            "Cellpose pretrained model used to segment the mean images. The "
-            "model must be present locally (CELLPOSE_LOCAL_MODELS_PATH); "
-            "network downloads are disabled."
+            "Cellpose pretrained model used to segment the mean images. It "
+            "is read from CELLPOSE_LOCAL_MODELS_PATH when present there, and "
+            "downloaded otherwise."
         ),
     )
 
@@ -170,7 +170,7 @@ class DecrosstalkSettings(BaseSettings, cli_parse_args=True):
 
     @field_validator("block_size", mode="before")
     @classmethod
-    def _coerce_block_size(cls, value):
+    def _coerce_block_size(cls, value: Any) -> Optional[List[int]]:
         """Coerce a CLI/env block_size to a list of ints, or ``None``.
 
         Accepts a JSON string (``"[128, 128]"``) or a list whose elements may

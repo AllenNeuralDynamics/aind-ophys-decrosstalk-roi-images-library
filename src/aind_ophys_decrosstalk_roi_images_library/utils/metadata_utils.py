@@ -9,13 +9,20 @@ has to reproduce.
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema_models.process_names import ProcessName
-from aind_pophys_metadata import fields, io
+from aind_pophys_metadata import (
+    MODEL_SOURCE_ASSET,
+    MODEL_SOURCE_NETWORK,
+    fields,
+    io,
+    model_provenance,
+)
 from aind_pophys_metadata import processing as shared_processing
 
 logger = logging.getLogger(__name__)
@@ -30,6 +37,14 @@ V1_DATA_PROCESS_GLOB = "*data_process.json"
 
 # The two suite2p settings paired-plane registration must reproduce exactly.
 _REQUIRED_SUITE2P_KEYS = ("block_size", "nonrigid")
+
+# Cellpose's own convention for where it looks for (and caches) weights. The
+# capsule wrapper points it at the mounted model asset; the library only reads
+# it, so no filesystem layout is baked in here.
+CELLPOSE_MODELS_PATH_ENV = "CELLPOSE_LOCAL_MODELS_PATH"
+
+# The key the model records land under in code.parameters.
+MODEL_FILES_PARAM = "cellpose_model_files"
 
 
 @dataclass(frozen=True)
@@ -321,6 +336,82 @@ def resolve_suite2p_params(
     resolved["block_size"] = [int(x) for x in resolved["block_size"]]
     resolved["nonrigid"] = bool(resolved["nonrigid"])
     return resolved
+
+
+def cellpose_model_filenames(model_type: str) -> Tuple[str, ...]:
+    """Return every weights file Cellpose resolves for ``model_type``.
+
+    ``Cellpose.__init__`` builds the diameter-estimating ``SizeModel``
+    unconditionally, so the size model is resolved alongside the segmentation
+    net even when no diameter is requested. Both are named.
+
+    Parameters
+    ----------
+    model_type : str
+        Cellpose pretrained model name, e.g. ``"cyto"``.
+
+    Returns
+    -------
+    tuple of str
+        The segmentation net and size-model file names, in that order.
+    """
+    return (f"{model_type}torch_0", f"size_{model_type}torch_0.npy")
+
+
+def cellpose_models_dir() -> Optional[Path]:
+    """Return the directory Cellpose resolves its weights from, if declared.
+
+    Read from :data:`CELLPOSE_MODELS_PATH_ENV`; the caller's environment is
+    the only source, so the library never assumes a mount point.
+
+    Returns
+    -------
+    Path or None
+        The declared directory, or ``None`` when the variable is unset or
+        empty.
+    """
+    value = os.environ.get(CELLPOSE_MODELS_PATH_ENV)
+    return Path(value) if value else None
+
+
+def cellpose_model_provenance(
+    model_type: str,
+    downloaded: bool = False,
+) -> List[Dict[str, str]]:
+    """Describe the Cellpose weights this run loaded, for ``code.parameters``.
+
+    Provenance only: nothing is compared or verified, and a file that is not
+    there is omitted rather than fabricated. ``source_name`` is the models
+    directory's basename, a stable logical label rather than the resolved
+    path.
+
+    Parameters
+    ----------
+    model_type : str
+        Cellpose pretrained model name, e.g. ``"cyto"``.
+    downloaded : bool, optional
+        ``True`` when the weights were absent before the run and Cellpose
+        fetched them, which is recorded as a network source.
+
+    Returns
+    -------
+    list of dict
+        One record per resolved file; empty when no models directory is
+        declared or none of the files are present.
+    """
+    models_dir = cellpose_models_dir()
+    if models_dir is None:
+        logger.warning(
+            "%s is unset; recording no Cellpose model provenance",
+            CELLPOSE_MODELS_PATH_ENV,
+        )
+        return []
+    return model_provenance(
+        models_dir,
+        cellpose_model_filenames(model_type),
+        source_name=models_dir.name,
+        source=MODEL_SOURCE_NETWORK if downloaded else MODEL_SOURCE_ASSET,
+    )
 
 
 def build_code(

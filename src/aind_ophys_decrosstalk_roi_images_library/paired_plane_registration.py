@@ -160,7 +160,18 @@ def paired_plane_cached_movie(
     ValueError
         If the movie length and the offset table disagree.
     """
-    block_size = tuple(block_size or DEFAULT_BLOCK_SIZE)
+    # Tested against None rather than truthiness: block_size arrives from
+    # upstream metadata and suite2p itself hands it out as an array, whose
+    # __bool__ raises. An empty or malformed value is an error, not a reason
+    # to fall back -- registering with a block size suite2p did not use
+    # produces a wrongly warped paired movie and so wrong coefficients.
+    if block_size is None:
+        block_size = DEFAULT_BLOCK_SIZE
+    block_size = tuple(int(v) for v in block_size)
+    if len(block_size) != 2:
+        raise ValueError(
+            f"block_size must hold exactly 2 values, got {block_size}."
+        )
     temp_path = (
         Path(tmp_dir) / f'{Path(h5_file).name.split(".")[0]}'
         "_registered_to_pair.h5"

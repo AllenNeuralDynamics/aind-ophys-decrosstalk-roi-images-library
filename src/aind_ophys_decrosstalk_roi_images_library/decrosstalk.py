@@ -6,10 +6,10 @@ are fitted per epoch by minimising the normalised mutual information between
 the two planes' reconstructed ROI images, then averaged and applied to the
 full movie.
 
-ROIs are detected with Cellpose on the episodic mean FOV images. Cellpose's
-network download is disabled on import: the model must already be present
-locally (``CELLPOSE_LOCAL_MODELS_PATH``), so a missing model fails loudly
-instead of silently reaching the internet from inside a compute node.
+ROIs are detected with Cellpose on the episodic mean FOV images. Cellpose
+looks for its weights under ``CELLPOSE_LOCAL_MODELS_PATH`` first and downloads
+them when they are absent. Which bytes were used is recorded in the emitted
+``code.parameters`` by ``metadata_utils.cellpose_model_provenance``.
 """
 
 import logging
@@ -22,10 +22,11 @@ import numpy as np
 import pandas as pd
 import skimage
 from cellpose import models as cp_models
-from cellpose import utils as cp_utils
 
 mpl.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.axes import Axes  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +42,6 @@ DEFAULT_MAX_GRID_VAL = 0.3
 # discarded. Distinct from DEFAULT_MOTION_BUFFER (which crops the image
 # itself) even though both happen to be 5 pixels.
 DEFAULT_ROI_BORDER_BUFFER = 5
-
-
-def _refuse_model_download(*args, **kwargs):
-    """Raise instead of downloading a Cellpose model over the network."""
-    raise RuntimeError("Network access attempted for model download")
-
-
-cp_utils.download_url_to_file = _refuse_model_download
 
 
 def get_motion_correction_crop_xy_range(
@@ -397,7 +390,7 @@ def get_signal_paired_top_masks(
     model = cp_models.Cellpose(gpu=False, model_type=cellpose_model_type)
     dendrite_diameter_px = dendrite_diameter_um / pix_size
 
-    def _masks(image):
+    def _masks(image: np.ndarray) -> np.ndarray:
         """Segment one mean image and filter dendrites and border ROIs."""
         masks, _, _, _ = model.eval(image, diameter=None, channels=[0, 0])
         masks = filter_dendrite(
@@ -683,10 +676,10 @@ def apply_mixing_matrix(
 def draw_masks_on_image(
     img: np.ndarray,
     masks: np.ndarray,
-    ax=None,
+    ax: Optional[Axes] = None,
     color: str = "r",
     linewidth: int = 1,
-):
+) -> Optional[Tuple[Figure, Axes]]:
     """Overlay ROI contours on an image, for interactive inspection.
 
     Parameters

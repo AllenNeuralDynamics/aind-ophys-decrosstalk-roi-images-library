@@ -377,5 +377,74 @@ class TestPlaneIdentity(unittest.TestCase):
         self.assertIsNone(mu.process_name(None))
 
 
+class TestCellposeModelProvenance(unittest.TestCase):
+    """The model records that land in ``code.parameters``."""
+
+    def test_filenames_include_the_size_model(self):
+        """Cellpose builds the SizeModel unconditionally, so both resolve."""
+        self.assertEqual(
+            mu.cellpose_model_filenames("cyto"),
+            ("cytotorch_0", "size_cytotorch_0.npy"),
+        )
+
+    def test_models_dir_comes_from_the_environment(self):
+        """The directory is read, never assumed, by the library."""
+        with patch.dict(
+            "os.environ", {mu.CELLPOSE_MODELS_PATH_ENV: "/models/cellpose"}
+        ):
+            self.assertEqual(
+                mu.cellpose_models_dir(), Path("/models/cellpose")
+            )
+
+    def test_unset_models_dir_warns_and_records_nothing(self):
+        """No declared directory means no provenance to state."""
+        with patch.dict("os.environ", {mu.CELLPOSE_MODELS_PATH_ENV: ""}):
+            with self.assertLogs(mu.logger, level="WARNING"):
+                self.assertEqual(mu.cellpose_model_provenance("cyto"), [])
+            self.assertIsNone(mu.cellpose_models_dir())
+
+    def test_local_weights_are_recorded_as_an_asset(self):
+        """Present files are hashed and labelled by the directory name."""
+        with TemporaryDirectory() as tmp:
+            models_dir = Path(tmp) / "cellpose-cyto"
+            models_dir.mkdir()
+            (models_dir / "cytotorch_0").write_bytes(b"net")
+            (models_dir / "size_cytotorch_0.npy").write_bytes(b"size")
+            with patch.dict(
+                "os.environ",
+                {mu.CELLPOSE_MODELS_PATH_ENV: str(models_dir)},
+            ):
+                records = mu.cellpose_model_provenance("cyto")
+        self.assertEqual(
+            [record["filename"] for record in records],
+            ["cytotorch_0", "size_cytotorch_0.npy"],
+        )
+        self.assertTrue(all(record["sha256"] for record in records))
+        self.assertEqual(
+            {record["source_name"] for record in records}, {"cellpose-cyto"}
+        )
+        self.assertEqual(
+            {record["source"] for record in records},
+            {mu.MODEL_SOURCE_ASSET},
+        )
+
+    def test_downloaded_weights_are_recorded_as_a_network_source(self):
+        """A post-run read describes bytes that arrived over the network."""
+        with TemporaryDirectory() as tmp:
+            models_dir = Path(tmp) / "cellpose-cyto"
+            models_dir.mkdir()
+            (models_dir / "cytotorch_0").write_bytes(b"net")
+            with patch.dict(
+                "os.environ",
+                {mu.CELLPOSE_MODELS_PATH_ENV: str(models_dir)},
+            ):
+                with self.assertLogs(level="WARNING"):
+                    records = mu.cellpose_model_provenance(
+                        "cyto", downloaded=True
+                    )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["source"], mu.MODEL_SOURCE_NETWORK)
+
+
 if __name__ == "__main__":
     unittest.main()

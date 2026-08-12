@@ -324,6 +324,7 @@ def _decrosstalk_plane(
     paired_emf: Path,
     suite2p_params: dict,
     plane_ctx: StageContext,
+    model_files: List[Dict[str, str]],
 ) -> None:
     """Fit and apply the mixing coefficients for a single plane.
 
@@ -348,6 +349,10 @@ def _decrosstalk_plane(
     plane_ctx : StageContext
         Populated in place so the ``processing.json`` the stage guard writes
         reports partial provenance even when this raises.
+    model_files : list of dict
+        Cellpose model provenance resolved before the run; empty when the
+        weights were not present locally, in which case Cellpose downloaded
+        them and they are described here instead.
     """
     num_frames = settings.resolved_num_frames()
     signal_movie = _registered_movie(pair_dir, oeid)
@@ -398,6 +403,15 @@ def _decrosstalk_plane(
         ),
         **suite2p_params,
     }
+    # Nothing was resolvable locally before the run, so whatever is there now
+    # arrived over the network. Absent a models directory this stays empty and
+    # the key is omitted rather than guessed at.
+    if not model_files:
+        downloaded = mu.cellpose_model_provenance(
+            settings.cellpose_model_type, downloaded=True
+        )
+        if downloaded:
+            plane_ctx.output_parameters[mu.MODEL_FILES_PARAM] = downloaded
 
     decrosstalk_fn = _write_decrosstalk_movie(
         settings,
@@ -459,6 +473,7 @@ def _run_decrosstalk_pair(
     output_dirs: Dict[str, Path],
     contexts: Dict[str, StageContext],
     cached_movies: Dict[str, Path],
+    model_files: List[Dict[str, str]],
 ) -> None:
     """Decrosstalk both planes of the staged pair.
 
@@ -480,6 +495,8 @@ def _run_decrosstalk_pair(
     cached_movies : dict of str to Path
         Populated in place with the large paired-registered intermediates so
         the caller can delete them however the run ends.
+    model_files : list of dict
+        Cellpose model provenance resolved before the run.
     """
     oeid1, oeid2 = oeids
     Path(settings.tmp_dir).mkdir(parents=True, exist_ok=True)
@@ -523,6 +540,7 @@ def _run_decrosstalk_pair(
             cached_emf[paired_oeid],
             suite2p_params,
             contexts[oeid],
+            model_files,
         )
 
 
@@ -548,6 +566,7 @@ def _enter_stage_guard(
     output_dir: Path,
     plane_id: Optional[str],
     input_data: Optional[List[str]] = None,
+    model_files: Optional[List[Dict[str, str]]] = None,
 ) -> StageContext:
     """Open one plane's stage guard on ``stack`` and return its context.
 
@@ -568,6 +587,9 @@ def _enter_stage_guard(
         Plane/FOV id, or ``None`` when no plane could be resolved.
     input_data : list of str, optional
         Input data path(s) for provenance.
+    model_files : list of dict, optional
+        Cellpose model provenance records, recorded alongside the settings so
+        the document names the model bytes the run loaded.
 
     Returns
     -------
@@ -576,9 +598,10 @@ def _enter_stage_guard(
     """
     results_root = Path(settings.output_dir).resolve()
     input_dir = Path(settings.input_dir).resolve()
-    code = mu.build_code(
-        settings.model_dump(mode="json"), input_data=input_data
-    )
+    parameters = settings.model_dump(mode="json")
+    if model_files:
+        parameters[mu.MODEL_FILES_PARAM] = model_files
+    code = mu.build_code(parameters, input_data=input_data)
     context = stack.enter_context(
         stage_guard(
             output_dir,
@@ -644,6 +667,9 @@ def run(settings: Optional[DecrosstalkSettings] = None) -> None:
     results_root = Path(settings.output_dir).resolve()
     input_dir = Path(settings.input_dir).resolve()
     cached_movies: Dict[str, Path] = {}
+    # Resolved before any segmentation runs, so a later download is
+    # distinguishable from weights that were already local.
+    model_files = mu.cellpose_model_provenance(settings.cellpose_model_type)
 
     with ExitStack() as stack:
         stack.callback(_cleanup_cached_movies, cached_movies.values())
@@ -652,7 +678,13 @@ def run(settings: Optional[DecrosstalkSettings] = None) -> None:
         except BaseException:
             # No plane id is known yet, so the one document this run can
             # honestly write goes to the results root.
-            _enter_stage_guard(stack, settings, results_root, None)
+            _enter_stage_guard(
+                stack,
+                settings,
+                results_root,
+                None,
+                model_files=model_files,
+            )
             raise
         logger.info("Decrosstalking pair %s / %s from %s", *oeids, pair_dir)
         mu.validate_pair_ids(oeids, metadata.fov_ids)
@@ -671,6 +703,7 @@ def run(settings: Optional[DecrosstalkSettings] = None) -> None:
                         input_dir, _registered_movie(pair_dir, oeid)
                     )
                 ],
+                model_files=model_files,
             )
             for oeid in oeids
         }
@@ -682,6 +715,7 @@ def run(settings: Optional[DecrosstalkSettings] = None) -> None:
             output_dirs,
             contexts,
             cached_movies,
+            model_files,
         )
 
     if settings.verify:

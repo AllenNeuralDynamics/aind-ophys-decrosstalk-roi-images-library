@@ -49,7 +49,7 @@ dependencies = [
     # >=6.1.0,<7, so bumping one alone leaves the environment unresolvable.
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@afcb367f71c3127173a1ae4357135a41901e0466",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@123f5cf25ca3a12b572bbba58c6449814d41f19f",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     "aind-ophys-utils>=0.2.0",
     "cellpose==2.2.3",
