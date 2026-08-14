@@ -61,7 +61,7 @@ def _write(directory: Path, name: str, payload: dict) -> Path:
 class TestLoadDecrosstalkMetadata(unittest.TestCase):
     """v1/v2 dispatch for the fields decrosstalk consumes."""
 
-    def test_reads_v1_session(self):
+    def test_reads_v1_session(self) -> None:
         """A v1 session.json supplies frame rate, rig, subject and planes."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -74,7 +74,7 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
         self.assertEqual(metadata.dataset_name, DATA_DESCRIPTION["name"])
         self.assertEqual(metadata.fov_ids, ("VISp_0", "VISl_1"))
 
-    def test_reads_v2_acquisition(self):
+    def test_reads_v2_acquisition(self) -> None:
         """A v2 acquisition.json supplies the same fields."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -84,7 +84,7 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
         self.assertEqual(metadata.instrument_id, "MESO.1")
         self.assertIsNone(metadata.dataset_name)
 
-    def test_cli_frame_rate_fills_a_rateless_asset(self):
+    def test_cli_frame_rate_fills_a_rateless_asset(self) -> None:
         """The CLI override is used when the metadata declares no rate."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -92,7 +92,7 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
             metadata = mu.load_decrosstalk_metadata(root, cli_frame_rate=7.0)
         self.assertEqual(metadata.frame_rate, 7.0)
 
-    def test_required_frame_rate_raises_when_unresolvable(self):
+    def test_required_frame_rate_raises_when_unresolvable(self) -> None:
         """Debug mode cannot size its truncation without a rate."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -100,7 +100,7 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
             with self.assertRaises(ValueError):
                 mu.load_decrosstalk_metadata(root, require_frame_rate=True)
 
-    def test_absent_frame_rate_is_not_fatal_outside_debug(self):
+    def test_absent_frame_rate_is_not_fatal_outside_debug(self) -> None:
         """A rate-less asset still runs when the truncation is not needed."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -108,13 +108,13 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
             metadata = mu.load_decrosstalk_metadata(root)
         self.assertIsNone(metadata.frame_rate)
 
-    def test_missing_core_file_raises(self):
+    def test_missing_core_file_raises(self) -> None:
         """Neither core file present is a fail-fast FileNotFoundError."""
         with TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
                 mu.load_decrosstalk_metadata(Path(tmp))
 
-    def test_both_core_files_raise(self):
+    def test_both_core_files_raise(self) -> None:
         """Both core files present is ambiguous and rejected."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -123,7 +123,7 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
             with self.assertRaises(ValueError):
                 mu.load_decrosstalk_metadata(root)
 
-    def test_metadata_is_frozen(self):
+    def test_metadata_is_frozen(self) -> None:
         """The metadata view is immutable."""
         metadata = mu.DecrosstalkMetadata(frame_rate=9.48)
         with self.assertRaises(Exception):
@@ -133,7 +133,7 @@ class TestLoadDecrosstalkMetadata(unittest.TestCase):
 class TestUpstreamSuite2pParams(unittest.TestCase):
     """Reading block_size / nonrigid from the upstream motion correction."""
 
-    def test_reads_v2_processing_json(self):
+    def test_reads_v2_processing_json(self) -> None:
         """v2 records the settings flat on code.parameters."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -157,7 +157,7 @@ class TestUpstreamSuite2pParams(unittest.TestCase):
             params = mu.read_upstream_suite2p_params(root)
         self.assertEqual(params, {"block_size": [128, 128], "nonrigid": True})
 
-    def test_reads_v1_data_process_json(self):
+    def test_reads_v1_data_process_json(self) -> None:
         """v1 nested them under parameters.suite2p_args."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -176,7 +176,7 @@ class TestUpstreamSuite2pParams(unittest.TestCase):
             params = mu.read_upstream_suite2p_params(root)
         self.assertEqual(params, {"block_size": [64, 64], "nonrigid": False})
 
-    def test_reads_v1_flat_parameters(self):
+    def test_reads_v1_flat_parameters(self) -> None:
         """A v1 document without the suite2p_args nesting still resolves."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -188,7 +188,7 @@ class TestUpstreamSuite2pParams(unittest.TestCase):
             params = mu.read_upstream_suite2p_params(root)
         self.assertEqual(params, {"block_size": [32, 32], "nonrigid": True})
 
-    def test_v2_preferred_over_v1(self):
+    def test_v2_preferred_over_v1(self) -> None:
         """With both present the v2 document wins."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -216,19 +216,19 @@ class TestUpstreamSuite2pParams(unittest.TestCase):
             params = mu.read_upstream_suite2p_params(root)
         self.assertEqual(params["block_size"], [128, 128])
 
-    def test_empty_processing_json_is_skipped(self):
+    def test_empty_processing_json_is_skipped(self) -> None:
         """Raw assets ship a two-byte '{}'; it must not raise."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write(root, "processing.json", {})
             self.assertEqual(mu.read_upstream_suite2p_params(root), {})
 
-    def test_no_upstream_document(self):
+    def test_no_upstream_document(self) -> None:
         """Nothing upstream reads as no parameters."""
         with TemporaryDirectory() as tmp:
             self.assertEqual(mu.read_upstream_suite2p_params(Path(tmp)), {})
 
-    def test_v2_skips_process_without_the_keys(self):
+    def test_v2_skips_process_without_the_keys(self) -> None:
         """A data_process lacking the keys is passed over, not fatal."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -250,7 +250,7 @@ class TestUpstreamSuite2pParams(unittest.TestCase):
 class TestResolveSuite2pParams(unittest.TestCase):
     """Override-wins resolution with fail-fast on the unresolvable."""
 
-    def test_overrides_win_and_skip_the_read(self):
+    def test_overrides_win_and_skip_the_read(self) -> None:
         """Both overrides given means no upstream read is attempted."""
         with TemporaryDirectory() as tmp:
             resolved = mu.resolve_suite2p_params(
@@ -260,7 +260,7 @@ class TestResolveSuite2pParams(unittest.TestCase):
             )
         self.assertEqual(resolved, {"nonrigid": False, "block_size": [16, 16]})
 
-    def test_falls_back_to_upstream(self):
+    def test_falls_back_to_upstream(self) -> None:
         """Unset overrides are filled from the upstream document."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -285,7 +285,7 @@ class TestResolveSuite2pParams(unittest.TestCase):
             resolved, {"nonrigid": True, "block_size": [128, 128]}
         )
 
-    def test_partial_override_mixes_sources(self):
+    def test_partial_override_mixes_sources(self) -> None:
         """One override plus one upstream value resolves both."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -301,7 +301,7 @@ class TestResolveSuite2pParams(unittest.TestCase):
             resolved = mu.resolve_suite2p_params(root, nonrigid_override=True)
         self.assertEqual(resolved, {"nonrigid": True, "block_size": [8, 8]})
 
-    def test_unresolvable_raises(self):
+    def test_unresolvable_raises(self) -> None:
         """Silently guessing would mis-register the paired plane, so raise."""
         with TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError) as ctx:
@@ -315,13 +315,13 @@ class TestBuildCode(unittest.TestCase):
     """The v2 Code block this capsule stamps onto every document."""
 
     @patch.dict("os.environ", {"VERSION": "15.0.0"}, clear=False)
-    def test_capsule_version_is_ignored(self):
+    def test_capsule_version_is_ignored(self) -> None:
         """The backing library, not the wrapper, identifies the artifact."""
         code = mu.build_code({"debug": False})
         self.assertNotEqual(code.version, "15.0.0")
         self.assertEqual(code.version, version(mu.LIBRARY_NAME))
 
-    def test_version_and_url_identify_the_backing_library(self):
+    def test_version_and_url_identify_the_backing_library(self) -> None:
         """code.version and code.url must name one artifact."""
         code = mu.build_code({})
         self.assertEqual(code.version, version(mu.LIBRARY_NAME))
@@ -329,7 +329,7 @@ class TestBuildCode(unittest.TestCase):
         # The landing page, not a branch or a subdirectory.
         self.assertNotIn("/tree/", code.url)
 
-    def test_records_input_data(self):
+    def test_records_input_data(self) -> None:
         """Input provenance is carried on the code block."""
         code = mu.build_code(
             {}, input_data=["plane_0/motion_correction/plane_0_registered.h5"]
@@ -341,38 +341,15 @@ class TestBuildCode(unittest.TestCase):
 
 
 class TestPlaneIdentity(unittest.TestCase):
-    """The scavenged-vs-canonical cross-check and the process name."""
+    """The process name used for the dependency graph."""
 
-    def test_canonical_pair_passes_quietly(self):
-        """Two canonical ids out of a multiplane session are no divergence."""
-        self.assertTrue(
-            mu.validate_pair_ids(
-                ["VISp_0", "VISl_1"],
-                ["VISp_0", "VISl_1", "VISa_2", "VISal_3"],
-            )
-        )
-
-    def test_unknown_id_warns_and_does_not_raise(self):
-        """Canonicality is cosmetic, so a divergence only warns."""
-        with self.assertLogs(mu.logger, level="WARNING") as logs:
-            result = mu.validate_pair_ids(
-                ["VISp_0", "plane_9"], ["VISp_0", "VISl_1"]
-            )
-        self.assertFalse(result)
-        self.assertIn("plane_9", "\n".join(logs.output))
-
-    def test_no_canonical_ids_warns_and_keeps_the_scavenged_pair(self):
-        """Metadata without planes leaves nothing to check against."""
-        with self.assertLogs(mu.logger, level="WARNING"):
-            self.assertTrue(mu.validate_pair_ids(["a", "b"], []))
-
-    def test_process_name_matches_the_shared_composition(self):
+    def test_process_name_matches_the_shared_composition(self) -> None:
         """The name used to exclude self from the dependency graph."""
         self.assertEqual(
             mu.process_name("VISp_0"), "VISp_0: Video plane decrosstalk"
         )
 
-    def test_process_name_without_a_plane(self):
+    def test_process_name_without_a_plane(self) -> None:
         """Without a plane id the schema derives the name itself."""
         self.assertIsNone(mu.process_name(None))
 
@@ -380,14 +357,14 @@ class TestPlaneIdentity(unittest.TestCase):
 class TestCellposeModelProvenance(unittest.TestCase):
     """The model records that land in ``code.parameters``."""
 
-    def test_filenames_include_the_size_model(self):
+    def test_filenames_include_the_size_model(self) -> None:
         """Cellpose builds the SizeModel unconditionally, so both resolve."""
         self.assertEqual(
             mu.cellpose_model_filenames("cyto"),
             ("cytotorch_0", "size_cytotorch_0.npy"),
         )
 
-    def test_models_dir_comes_from_the_environment(self):
+    def test_models_dir_comes_from_the_environment(self) -> None:
         """The directory is read, never assumed, by the library."""
         with patch.dict(
             "os.environ", {mu.CELLPOSE_MODELS_PATH_ENV: "/models/cellpose"}
@@ -396,14 +373,14 @@ class TestCellposeModelProvenance(unittest.TestCase):
                 mu.cellpose_models_dir(), Path("/models/cellpose")
             )
 
-    def test_unset_models_dir_warns_and_records_nothing(self):
+    def test_unset_models_dir_warns_and_records_nothing(self) -> None:
         """No declared directory means no provenance to state."""
         with patch.dict("os.environ", {mu.CELLPOSE_MODELS_PATH_ENV: ""}):
             with self.assertLogs(mu.logger, level="WARNING"):
                 self.assertEqual(mu.cellpose_model_provenance("cyto"), [])
             self.assertIsNone(mu.cellpose_models_dir())
 
-    def test_local_weights_are_recorded_as_an_asset(self):
+    def test_local_weights_are_recorded_as_an_asset(self) -> None:
         """Present files are hashed and labelled by the directory name."""
         with TemporaryDirectory() as tmp:
             models_dir = Path(tmp) / "cellpose-cyto"
@@ -428,7 +405,7 @@ class TestCellposeModelProvenance(unittest.TestCase):
             {mu.MODEL_SOURCE_ASSET},
         )
 
-    def test_downloaded_weights_are_recorded_as_a_network_source(self):
+    def test_downloaded_weights_are_recorded_as_a_network_source(self) -> None:
         """A post-run read describes bytes that arrived over the network."""
         with TemporaryDirectory() as tmp:
             models_dir = Path(tmp) / "cellpose-cyto"

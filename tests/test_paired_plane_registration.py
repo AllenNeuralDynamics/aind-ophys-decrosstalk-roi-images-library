@@ -83,7 +83,7 @@ def _n_blocks() -> int:
 class TestGetS2pMotionTransform(unittest.TestCase):
     """Loading a suite2p motion-transform CSV back into arrays."""
 
-    def test_nonrigid_columns_become_float_arrays(self):
+    def test_nonrigid_columns_become_float_arrays(self) -> None:
         """The bracketed CSV cells parse back into per-block offsets."""
         n_blocks = _n_blocks()
         with TemporaryDirectory() as tmp:
@@ -99,7 +99,7 @@ class TestGetS2pMotionTransform(unittest.TestCase):
             np.vstack(reg_df.nonrigid_x.values).shape, (N_FRAMES, n_blocks)
         )
 
-    def test_rigid_offsets_stay_integers(self):
+    def test_rigid_offsets_stay_integers(self) -> None:
         """np.roll rejects float shifts, so the rigid columns must be ints."""
         with TemporaryDirectory() as tmp:
             csv_path = _write_motion_transform_csv(Path(tmp) / "rigid.csv")
@@ -107,7 +107,7 @@ class TestGetS2pMotionTransform(unittest.TestCase):
         for column in ("x", "y"):
             self.assertTrue(np.issubdtype(reg_df[column].dtype, np.integer))
 
-    def test_missing_nonrigid_columns_raise(self):
+    def test_missing_nonrigid_columns_raise(self) -> None:
         """A rigid-only CSV cannot satisfy a non-rigid request."""
         with TemporaryDirectory() as tmp:
             csv_path = _write_motion_transform_csv(Path(tmp) / "rigid.csv")
@@ -119,7 +119,7 @@ class TestGetS2pMotionTransform(unittest.TestCase):
 class TestShiftFrame(unittest.TestCase):
     """The rigid roll applied to a single movie frame."""
 
-    def test_shifts_match_np_roll(self):
+    def test_shifts_match_np_roll(self) -> None:
         """A real frame is rolled by the negated offsets."""
         rng = np.random.default_rng(2)
         frame = rng.integers(0, 2000, FRAME_SHAPE).astype(np.int16)
@@ -129,7 +129,7 @@ class TestShiftFrame(unittest.TestCase):
         )
         self.assertEqual(shifted.dtype, np.int16)
 
-    def test_a_movie_stack_is_rejected(self):
+    def test_a_movie_stack_is_rejected(self) -> None:
         """Only 2D frames are shiftable."""
         with self.assertRaises(AssertionError):
             ppr.shift_frame(np.zeros((2, *FRAME_SHAPE), np.int16), dy=0, dx=0)
@@ -138,7 +138,7 @@ class TestShiftFrame(unittest.TestCase):
 class TestProjectionProcessChunked(unittest.TestCase):
     """Chunked reduction over an HDF5 movie dataset."""
 
-    def test_matches_the_whole_array_reduction(self):
+    def test_matches_the_whole_array_reduction(self) -> None:
         """Chunking does not change the avg or max projection."""
         with TemporaryDirectory() as tmp:
             movie = Path(tmp) / "VISp_0_registered.h5"
@@ -156,7 +156,7 @@ class TestProjectionProcessChunked(unittest.TestCase):
         np.testing.assert_array_equal(maximum, data.max(axis=0))
         self.assertEqual(avg.dtype, np.float32)
 
-    def test_projects_a_frame_range(self):
+    def test_projects_a_frame_range(self) -> None:
         """An epoch projection reads only its own frames."""
         with TemporaryDirectory() as tmp:
             movie = Path(tmp) / "VISp_0_registered.h5"
@@ -169,7 +169,7 @@ class TestProjectionProcessChunked(unittest.TestCase):
             avg, data[10:20].mean(axis=0).astype(np.float32), rtol=1e-5
         )
 
-    def test_range_is_clipped_to_the_dataset(self):
+    def test_range_is_clipped_to_the_dataset(self) -> None:
         """A request past the end reduces the available frames instead."""
         with TemporaryDirectory() as tmp:
             movie = Path(tmp) / "VISp_0_registered.h5"
@@ -184,7 +184,7 @@ class TestProjectionProcessChunked(unittest.TestCase):
         np.testing.assert_array_equal(maximum, data.max(axis=0))
         self.assertEqual(avg.shape, FRAME_SHAPE)
 
-    def test_empty_range_and_unknown_projection_raise(self):
+    def test_empty_range_and_unknown_projection_raise(self) -> None:
         """Both misuses fail at the call rather than downstream."""
         with TemporaryDirectory() as tmp:
             movie = Path(tmp) / "VISp_0_registered.h5"
@@ -203,7 +203,7 @@ class TestProjectionProcessChunked(unittest.TestCase):
 class TestPairedPlaneCachedMovie(unittest.TestCase):
     """Re-registering a raw movie with the paired plane's offsets."""
 
-    def test_rigid_registration_rolls_every_frame(self):
+    def test_rigid_registration_rolls_every_frame(self) -> None:
         """Each frame is rolled by that frame's offsets, in int16."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -226,7 +226,7 @@ class TestPairedPlaneCachedMovie(unittest.TestCase):
                 ppr.shift_frame(data[i], dy=reg_df["y"][i], dx=reg_df["x"][i]),
             )
 
-    def test_nonrigid_registration_applies_the_block_offsets(self):
+    def test_nonrigid_registration_applies_the_block_offsets(self) -> None:
         """The non-rigid pass runs on the stacked per-block offsets."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -251,12 +251,11 @@ class TestPairedPlaneCachedMovie(unittest.TestCase):
         self.assertEqual(registered.dtype, np.int16)
         self.assertEqual(cached.name, "VISp_0_registered_to_pair.h5")
 
-    def test_block_size_may_be_an_array(self):
+    def test_block_size_may_be_an_array(self) -> None:
         """suite2p hands its own block size out as an array, not a list.
 
-        ``tuple(block_size or DEFAULT)`` called ``__bool__`` on it, which
-        raises ``ValueError: The truth value of an array with more than one
-        element is ambiguous``.
+        Testing it for truthiness would raise ``ValueError: The truth value of
+        an array with more than one element is ambiguous``.
         """
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -276,7 +275,7 @@ class TestPairedPlaneCachedMovie(unittest.TestCase):
             with h5py.File(cached, "r") as f:
                 self.assertEqual(f["data"].shape[0], N_FRAMES)
 
-    def test_an_empty_block_size_raises(self):
+    def test_an_empty_block_size_raises(self) -> None:
         """A malformed upstream value must not silently become the default.
 
         Registering with a block size suite2p did not use warps the paired
@@ -295,7 +294,7 @@ class TestPairedPlaneCachedMovie(unittest.TestCase):
                 )
         self.assertIn("exactly 2 values", str(ctx.exception))
 
-    def test_length_mismatch_raises(self):
+    def test_length_mismatch_raises(self) -> None:
         """A transform table shorter than the movie is a fail-fast error."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -317,7 +316,7 @@ class TestPairedPlaneCachedMovie(unittest.TestCase):
 class TestEpisodicMeanFov(unittest.TestCase):
     """The episodic mean FOV stack and its projection images."""
 
-    def test_writes_the_stack_and_the_projection_images(self):
+    def test_writes_the_stack_and_the_projection_images(self) -> None:
         """One mean image per epoch, plus the avg and max PNGs."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -335,7 +334,7 @@ class TestEpisodicMeanFov(unittest.TestCase):
         )
         self.assertEqual(mean_fov.shape, (4, *FRAME_SHAPE))
 
-    def test_webm_is_encoded_from_the_stack(self):
+    def test_webm_is_encoded_from_the_stack(self) -> None:
         """The QC reference movie is encoded from the real float stack."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -348,7 +347,7 @@ class TestEpisodicMeanFov(unittest.TestCase):
             self.assertTrue(webm.exists())
             self.assertGreater(webm.stat().st_size, 0)
 
-    def test_rejects_a_non_h5_movie_and_a_missing_save_dir(self):
+    def test_rejects_a_non_h5_movie_and_a_missing_save_dir(self) -> None:
         """Both inputs are checked before any frame is read."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -363,29 +362,29 @@ class TestEpisodicMeanFov(unittest.TestCase):
 class TestEpochStartFrames(unittest.TestCase):
     """Epoch start/length selection across movie lengths."""
 
-    def test_full_length_movie_uses_max_epochs(self):
+    def test_full_length_movie_uses_max_epochs(self) -> None:
         """A long movie is capped by max_num_epochs, not by its length."""
         starts, num_frames = ppr._epoch_start_frames(30000, 10, 1000)
         self.assertEqual(len(starts), 10)
         self.assertEqual(num_frames, 1000)
 
-    def test_epoch_fits_inside_the_movie(self):
+    def test_epoch_fits_inside_the_movie(self) -> None:
         """The last epoch never reads past the end of the movie."""
         for data_length in (2, 100, 999, 3000, 30000):
             starts, num_frames = ppr._epoch_start_frames(data_length, 10, 1000)
             self.assertLessEqual(starts[-1] + num_frames, data_length)
 
-    def test_short_movie_yields_one_shortened_epoch(self):
+    def test_short_movie_yields_one_shortened_epoch(self) -> None:
         """A debug-truncated movie gets one epoch instead of raising.
 
-        100 frames against a 300-frame request previously raised, which made
-        the capsule unrunnable with --debug true.
+        100 frames against a 300-frame request is what a --debug run asks
+        for, so it must shorten the epoch rather than fail.
         """
         starts, num_frames = ppr._epoch_start_frames(100, 10, 300)
         self.assertEqual(starts, [25])
         self.assertEqual(num_frames, 50)
 
-    def test_num_frames_never_drops_below_one(self):
+    def test_num_frames_never_drops_below_one(self) -> None:
         """A one-frame movie still asks for a single frame, not zero.
 
         num_frames of 0 makes the chunked projection return None, which fails
@@ -395,13 +394,13 @@ class TestEpochStartFrames(unittest.TestCase):
         self.assertEqual(num_frames, 1)
         self.assertEqual(starts, [0])
 
-    def test_epoch_count_is_at_least_one(self):
+    def test_epoch_count_is_at_least_one(self) -> None:
         """start_frames is never empty, whatever the ratio works out to."""
         for data_length in (1, 2, 50, 100, 299):
             starts, _ = ppr._epoch_start_frames(data_length, 10, 300)
             self.assertGreaterEqual(len(starts), 1)
 
-    def test_empty_movie_raises(self):
+    def test_empty_movie_raises(self) -> None:
         """Zero frames is unprojectable and fails with a clear message."""
         with self.assertRaises(ValueError) as ctx:
             ppr._epoch_start_frames(0, 10, 1000)

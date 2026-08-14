@@ -9,6 +9,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any, List, Tuple
 from unittest.mock import patch
 
 import h5py as h5
@@ -26,7 +27,7 @@ N_EPOCHS = 4
 N_GRID_POINTS = 9
 
 
-def _make_settings(**kwargs) -> DecrosstalkSettings:
+def _make_settings(**kwargs: Any) -> DecrosstalkSettings:
     """Construct DecrosstalkSettings with a clean ``sys.argv``."""
     with patch.object(sys, "argv", ["run_capsule.py"]):
         return DecrosstalkSettings(**kwargs)
@@ -41,7 +42,7 @@ def _write_movie(path: Path, n_frames: int = N_FRAMES) -> np.ndarray:
     return data
 
 
-def _fit_results():
+def _fit_results() -> Tuple[List[float], List[float], List[list]]:
     """Build per-epoch fit results the way the grid search produces them.
 
     ``alpha``/``beta`` are numpy scalars taken off the search grid, and each
@@ -60,7 +61,7 @@ def _fit_results():
 class TestWriteDecrosstalkMovie(unittest.TestCase):
     """Chunked unmixing of the full movie and the QC datasets beside it."""
 
-    def test_writes_the_unmixed_movie_and_the_fit_results(self):
+    def test_writes_the_unmixed_movie_and_the_fit_results(self) -> None:
         """Every frame is unmixed and the per-epoch fit rides along."""
         alpha_list, beta_list, mean_norm_mi_list = _fit_results()
         alpha = float(np.mean(alpha_list))
@@ -99,7 +100,7 @@ class TestWriteDecrosstalkMovie(unittest.TestCase):
         # input movie back.
         self.assertFalse(np.array_equal(data, signal_data))
 
-    def test_numpy_fit_results_are_supported(self):
+    def test_numpy_fit_results_are_supported(self) -> None:
         """The fit results are also accepted as arrays, not only lists.
 
         ``np.mean`` over the per-epoch values already returns numpy scalars,
@@ -131,7 +132,7 @@ class TestWriteDecrosstalkMovie(unittest.TestCase):
                     f["mean_norm_mi_list"].shape, (N_EPOCHS, N_GRID_POINTS)
                 )
 
-    def test_a_shorter_paired_movie_is_clamped_and_warned(self):
+    def test_a_shorter_paired_movie_is_clamped_and_warned(self) -> None:
         """A debug run truncates the paired movie but not the signal movie."""
         alpha_list, beta_list, mean_norm_mi_list = _fit_results()
         overlap = 20

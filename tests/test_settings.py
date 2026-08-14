@@ -3,6 +3,7 @@
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -12,7 +13,7 @@ from aind_ophys_decrosstalk_roi_images_library.settings import (
 )
 
 
-def _make_settings(**kwargs) -> DecrosstalkSettings:
+def _make_settings(**kwargs: Any) -> DecrosstalkSettings:
     """Construct DecrosstalkSettings with a clean ``sys.argv``.
 
     ``cli_parse_args=True`` would otherwise consume the test runner's own
@@ -25,7 +26,7 @@ def _make_settings(**kwargs) -> DecrosstalkSettings:
 class TestDecrosstalkSettings(unittest.TestCase):
     """Settings parsing, coercion and derived accessors."""
 
-    def test_defaults(self):
+    def test_defaults(self) -> None:
         """Defaults match the Code Ocean capsule layout."""
         settings = _make_settings()
         self.assertEqual(settings.input_dir, Path("../data/"))
@@ -37,18 +38,18 @@ class TestDecrosstalkSettings(unittest.TestCase):
         self.assertIsNone(settings.frame_rate)
         self.assertIsNone(settings.block_size)
 
-    def test_block_size_from_json_string(self):
+    def test_block_size_from_json_string(self) -> None:
         """A CLI/env string is parsed into a list of ints."""
         settings = _make_settings(block_size="[128, 256]")
         self.assertEqual(settings.block_size, [128, 256])
         self.assertEqual(settings.block_size_override(), [128, 256])
 
-    def test_block_size_from_string_elements(self):
+    def test_block_size_from_string_elements(self) -> None:
         """List elements that arrive as strings are coerced to ints."""
         settings = _make_settings(block_size=["64", "64"])
         self.assertEqual(settings.block_size, [64, 64])
 
-    def test_block_size_empty_means_unset(self):
+    def test_block_size_empty_means_unset(self) -> None:
         """An empty block_size reads as "no override"."""
         for value in ([], "", None):
             with self.subTest(value=value):
@@ -56,12 +57,12 @@ class TestDecrosstalkSettings(unittest.TestCase):
                 self.assertIsNone(settings.block_size)
                 self.assertIsNone(settings.block_size_override())
 
-    def test_block_size_rejects_non_numeric(self):
+    def test_block_size_rejects_non_numeric(self) -> None:
         """A non-numeric block_size fails validation rather than silently."""
         with self.assertRaises((ValidationError, SystemExit)):
             _make_settings(block_size="[128, oops]")
 
-    def test_resolved_num_frames(self):
+    def test_resolved_num_frames(self) -> None:
         """Debug mode swaps in the shorter per-epoch frame count."""
         self.assertEqual(
             _make_settings(debug=False).resolved_num_frames(), 1000
@@ -74,13 +75,13 @@ class TestDecrosstalkSettings(unittest.TestCase):
             42,
         )
 
-    def test_nonrigid_override_accepted(self):
+    def test_nonrigid_override_accepted(self) -> None:
         """The upstream override is a real tri-state, not a bool default."""
         self.assertIs(_make_settings(nonrigid=False).nonrigid, False)
         self.assertIs(_make_settings(nonrigid=True).nonrigid, True)
         self.assertIsNone(_make_settings().nonrigid)
 
-    def test_no_single_character_field_names(self):
+    def test_no_single_character_field_names(self) -> None:
         """No field may be 1 character: it renders as an unusable short flag.
 
         pydantic-settings turns a one-character field into ``-x``, which a Code
@@ -89,7 +90,7 @@ class TestDecrosstalkSettings(unittest.TestCase):
         short = [f for f in DecrosstalkSettings.model_fields if len(f) < 2]
         self.assertEqual(short, [])
 
-    def test_every_field_is_cli_addressable(self):
+    def test_every_field_is_cli_addressable(self) -> None:
         """Every field parses as ``--name=value``, the only form CO emits.
 
         Guards the app-panel contract at the source rather than relying on

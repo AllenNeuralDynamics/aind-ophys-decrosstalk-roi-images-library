@@ -12,23 +12,23 @@ from aind_ophys_decrosstalk_roi_images_library import qc
 class TestDecrosstalkMetric(unittest.TestCase):
     """The per-plane decrosstalk dropdown metric."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         """Build the metric once for the assertions below."""
         self.metric = qc.build_decrosstalk_metric(
             "VISp_0",
             "VISp_0/decrosstalk/VISp_0_decrosstalk_episodic_mean_fov.webm",
         )
 
-    def test_names_the_plane(self):
+    def test_names_the_plane(self) -> None:
         """The metric name carries the plane id."""
         self.assertEqual(self.metric.name, "VISp_0 Decrosstalk")
 
-    def test_carries_the_grouping_tags(self):
+    def test_carries_the_grouping_tags(self) -> None:
         """The evaluation tag is what default_grouping groups on."""
         self.assertEqual(self.metric.tags["evaluation"], "Decrosstalk")
         self.assertEqual(self.metric.tags["type"], "Operational QC")
 
-    def test_reference_and_options(self):
+    def test_reference_and_options(self) -> None:
         """The reference points at the QC movie; options are pass/fail."""
         self.assertTrue(self.metric.reference.endswith(".webm"))
         self.assertEqual(
@@ -36,13 +36,12 @@ class TestDecrosstalkMetric(unittest.TestCase):
         )
         self.assertEqual(self.metric.value.status, [Status.PASS, Status.FAIL])
 
-    def test_awaits_review(self):
+    def test_awaits_review(self) -> None:
         """The metric lands in the reviewer queue rather than auto-passing.
 
-        The empty value is what makes that true. qcportal treats "" as
-        pending; a preselected option renders as already answered, so a
-        reviewer would skip it -- and "Reasonable" maps to Status.PASS,
-        which would have auto-passed the review it exists to request.
+        The empty value is what makes that true: qcportal renders a
+        preselected option as already answered, and "Reasonable" maps to
+        Status.PASS, so it would auto-pass the review it exists to request.
         """
         self.assertEqual(len(self.metric.status_history), 1)
         self.assertEqual(self.metric.status_history[0].status, Status.PENDING)
@@ -52,14 +51,14 @@ class TestDecrosstalkMetric(unittest.TestCase):
 class TestQualityControlDocument(unittest.TestCase):
     """The full QualityControl wrapper and its writer."""
 
-    def test_default_grouping(self):
+    def test_default_grouping(self) -> None:
         """The project-standard grouping is applied."""
         metric = qc.build_decrosstalk_metric("VISp_0", "ref.webm")
         document = qc.build_quality_control([metric])
         self.assertEqual(document.default_grouping, ["evaluation"])
         self.assertEqual(len(document.metrics), 1)
 
-    def test_write_round_trips(self):
+    def test_write_round_trips(self) -> None:
         """The written document validates back as a full v2 QualityControl."""
         metric = qc.build_decrosstalk_metric("VISp_0", "ref.webm")
         with TemporaryDirectory() as tmp:

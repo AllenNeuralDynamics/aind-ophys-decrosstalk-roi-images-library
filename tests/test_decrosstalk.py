@@ -11,6 +11,7 @@ it needs the local model weights and is covered by the Code Ocean data run.
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,7 +24,9 @@ FRAME_SHAPE = (64, 64)
 ROI_WIDTH = 14
 
 
-def _label_image(origins) -> np.ndarray:
+def _label_image(
+    origins: Sequence[Tuple[int, int]],
+) -> np.ndarray:
     """Build a cellpose-style label image with one square ROI per origin.
 
     Cellpose returns a 2D integer label image, ids running ``1..N``.
@@ -47,7 +50,10 @@ def _mean_fov(masks: np.ndarray) -> np.ndarray:
 
 
 def _write_motion_transform_csv(
-    pair_dir: Path, oeid: str, y_offsets, x_offsets
+    pair_dir: Path,
+    oeid: str,
+    y_offsets: Sequence[int],
+    x_offsets: Sequence[int],
 ) -> Path:
     """Write one plane's motion-transform CSV where decrosstalk reads it."""
     directory = pair_dir / oeid / "motion_correction"
@@ -66,7 +72,7 @@ def _write_motion_transform_csv(
 class TestMotionCorrectionCropRange(unittest.TestCase):
     """Crop ranges derived from the upstream rigid offsets."""
 
-    def test_ranges_cover_the_observed_offsets(self):
+    def test_ranges_cover_the_observed_offsets(self) -> None:
         """The crop discards the band the frames were rolled through."""
         with TemporaryDirectory() as tmp:
             pair_dir = Path(tmp)
@@ -79,7 +85,7 @@ class TestMotionCorrectionCropRange(unittest.TestCase):
         self.assertEqual(range_y, [4, -6])
         self.assertEqual(range_x, [2, -3])
 
-    def test_intersection_of_both_planes(self):
+    def test_intersection_of_both_planes(self) -> None:
         """The pair is cropped to the band valid for both planes."""
         with TemporaryDirectory() as tmp:
             pair_dir = Path(tmp)
@@ -97,7 +103,7 @@ class TestMotionCorrectionCropRange(unittest.TestCase):
 class TestMaskFiltering(unittest.TestCase):
     """Dendrite, border and duplicate filtering of the label image."""
 
-    def test_dendrite_sized_masks_are_dropped(self):
+    def test_dendrite_sized_masks_are_dropped(self) -> None:
         """A mask smaller than a dendrite disc is zeroed, ids left as-is."""
         masks = _label_image([(20, 20), (40, 40)])
         masks[masks == 2] = 0
@@ -106,13 +112,13 @@ class TestMaskFiltering(unittest.TestCase):
         self.assertEqual(np.setdiff1d(np.unique(filtered), 0).tolist(), [1])
         self.assertEqual(filtered.dtype, masks.dtype)
 
-    def test_border_masks_are_dropped(self):
+    def test_border_masks_are_dropped(self) -> None:
         """An ROI touching the border band is zeroed."""
         masks = _label_image([(20, 20), (0, 40)])
         filtered = dri.filter_border_roi(masks)
         self.assertEqual(np.setdiff1d(np.unique(filtered), 0).tolist(), [1])
 
-    def test_reorder_makes_the_ids_contiguous(self):
+    def test_reorder_makes_the_ids_contiguous(self) -> None:
         """Filtering leaves gaps that the range-based loops would skip."""
         masks = _label_image([(10, 10), (30, 30), (10, 40)])
         masks[masks == 2] = 0
@@ -126,14 +132,14 @@ class TestMaskFiltering(unittest.TestCase):
 class TestIntensityRanking(unittest.TestCase):
     """Ranking and top-N selection over a real mean-FOV image."""
 
-    def test_ranks_brightest_first(self):
+    def test_ranks_brightest_first(self) -> None:
         """Rank 0 is the brightest ROI in the image."""
         masks = _label_image([(10, 10), (30, 30), (10, 40)])
         ranks, roi_inds = dri.get_ranks_roi_inds(_mean_fov(masks), masks)
         np.testing.assert_array_equal(roi_inds, [1, 2, 3])
         np.testing.assert_array_equal(ranks, [2, 1, 0])
 
-    def test_keeps_only_the_brightest_rois(self):
+    def test_keeps_only_the_brightest_rois(self) -> None:
         """The dimmest ROI is zeroed when more than num_top_rois survive."""
         masks = _label_image([(10, 10), (30, 30), (10, 40)])
         top = dri.get_top_intensity_mask(
@@ -141,7 +147,7 @@ class TestIntensityRanking(unittest.TestCase):
         )
         self.assertEqual(np.setdiff1d(np.unique(top), 0).tolist(), [2, 3])
 
-    def test_a_short_mask_is_returned_unchanged(self):
+    def test_a_short_mask_is_returned_unchanged(self) -> None:
         """Fewer ROIs than requested means no selection to make."""
         masks = _label_image([(10, 10), (30, 30)])
         top = dri.get_top_intensity_mask(
@@ -153,7 +159,7 @@ class TestIntensityRanking(unittest.TestCase):
 class TestBoundingBox(unittest.TestCase):
     """Expansion of each ROI into the box the MI comparison uses."""
 
-    def test_one_box_per_roi_extends_the_tight_mask(self):
+    def test_one_box_per_roi_extends_the_tight_mask(self) -> None:
         """The stack has an entry per ROI, each larger than its ROI."""
         masks = _label_image([(20, 20), (40, 40)])
         bb_masks = dri.get_bounding_box(masks)
@@ -172,14 +178,14 @@ class TestBoundingBox(unittest.TestCase):
                 * (box_x.max() - box_x.min() + 1),
             )
 
-    def test_boxes_are_clipped_to_the_image(self):
+    def test_boxes_are_clipped_to_the_image(self) -> None:
         """An ROI against the edge cannot extend past the FOV."""
         masks = _label_image([(0, 0)])
         bb_masks = dri.get_bounding_box(masks)
         self.assertEqual(np.where(bb_masks[0])[0].min(), 0)
         self.assertLess(np.where(bb_masks[0])[0].max(), FRAME_SHAPE[0])
 
-    def test_an_empty_mask_yields_an_empty_stack(self):
+    def test_an_empty_mask_yields_an_empty_stack(self) -> None:
         """No surviving ROI still concatenates with the other plane's boxes."""
         empty = np.zeros(FRAME_SHAPE, dtype=np.uint16)
         bb_masks = dri.get_bounding_box(empty)
@@ -195,7 +201,7 @@ class TestBoundingBox(unittest.TestCase):
 class TestApplyMixingMatrix(unittest.TestCase):
     """Unmixing a pair of frames with the fitted coefficients."""
 
-    def test_int16_movie_frames_are_unmixed(self):
+    def test_int16_movie_frames_are_unmixed(self) -> None:
         """The full-movie loop passes int16 frames read out of HDF5."""
         rng = np.random.default_rng(1)
         signal = rng.integers(0, 2000, FRAME_SHAPE).astype(np.int16)
@@ -209,7 +215,7 @@ class TestApplyMixingMatrix(unittest.TestCase):
         remixed_signal = 0.95 * recon_signal + 0.07 * recon_paired
         np.testing.assert_allclose(remixed_signal, signal, atol=1e-6)
 
-    def test_zero_coefficients_are_a_no_op(self):
+    def test_zero_coefficients_are_a_no_op(self) -> None:
         """An epoch that fitted nothing leaves the frames untouched."""
         rng = np.random.default_rng(2)
         signal = rng.uniform(0, 100, FRAME_SHAPE).astype(np.float32)
@@ -224,13 +230,13 @@ class TestApplyMixingMatrix(unittest.TestCase):
 class TestDrawMasksOnImage(unittest.TestCase):
     """The inspection overlay, on real image and mask arrays."""
 
-    def test_creates_its_own_figure(self):
+    def test_creates_its_own_figure(self) -> None:
         """Called without axes it returns the figure it made."""
         masks = _label_image([(20, 20)])
         result = dri.draw_masks_on_image(_mean_fov(masks), masks)
         self.assertEqual(len(result), 2)
 
-    def test_draws_on_supplied_axes(self):
+    def test_draws_on_supplied_axes(self) -> None:
         """Given axes it returns nothing and draws in place."""
         from matplotlib import pyplot as plt
 
@@ -244,7 +250,7 @@ class TestDrawMasksOnImage(unittest.TestCase):
 class TestModelDownloadFallback(unittest.TestCase):
     """Cellpose's own local-first resolution is left in place."""
 
-    def test_downloader_is_not_patched(self):
+    def test_downloader_is_not_patched(self) -> None:
         """Importing the module must not disable the network fallback."""
         from cellpose import utils as cp_utils
 

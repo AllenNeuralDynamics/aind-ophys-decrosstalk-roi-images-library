@@ -210,6 +210,8 @@ def paired_plane_cached_movie(
             )
             for start_frame, end_frame in zip(start_frames, end_frames):
                 frame_group = f["data"][start_frame:end_frame]
+                # int16 rather than uint16 to match suite2p's own dtype and
+                # the rest of the pipeline's movies.
                 r_frames = np.zeros_like(frame_group, dtype=np.int16)
                 for frame_index, (frame, dy, dx) in enumerate(
                     zip(
@@ -220,8 +222,6 @@ def paired_plane_cached_movie(
                 ):
                     r_frames[frame_index] = shift_frame(frame, dy=dy, dx=dx)
                 if non_rigid:
-                    # int16 rather than uint16 to match suite2p's own dtype and
-                    # the rest of the pipeline's movies.
                     r_frames = nonrigid.transform_data(
                         r_frames,
                         yblock=blocks[0],
@@ -306,11 +306,9 @@ def _epoch_start_frames(
     Half an epoch is skipped at each end so the projections avoid the
     laser-settling frames at the start and any truncation at the end.
 
-    A movie shorter than one requested epoch still yields a single epoch,
-    with ``num_frames`` shrunk to the available interval. Debug runs truncate
-    movies to ~100 frames against a 300-1000 frame epoch, so treating that as
-    an error rather than a shorter epoch made the whole capsule unrunnable in
-    debug mode.
+    A movie shorter than one requested epoch still yields a single epoch, with
+    ``num_frames`` shrunk to the available interval, because debug runs
+    truncate movies to ~100 frames against a 300-1000 frame epoch.
 
     Parameters
     ----------

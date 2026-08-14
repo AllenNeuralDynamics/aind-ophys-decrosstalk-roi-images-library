@@ -12,14 +12,14 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema_models.process_names import ProcessName
 from aind_pophys_metadata import (
     MODEL_SOURCE_ASSET,
     MODEL_SOURCE_NETWORK,
-    fields,
+    CoreMetadata,
     io,
     model_provenance,
 )
@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 
 CODE_NAME = "aind-ophys-decrosstalk-roi-images"
 LIBRARY_NAME = "aind-ophys-decrosstalk-roi-images-library"
+
+# Only this repo knows where its own code lives, so the url is stated here
+# rather than derived from the library name.
+REPO_URL = (
+    "https://github.com/AllenNeuralDynamics/"
+    "aind-ophys-decrosstalk-roi-images-library"
+)
 
 PROCESS_TYPE = ProcessName.VIDEO_PLANE_DECROSSTALK
 
@@ -52,8 +59,7 @@ class DecrosstalkMetadata:
     """Minimal metadata the decrosstalk capsule consumes.
 
     ``frame_rate`` is used only to size the debug truncation; the remaining
-    fields are identifiers used for logging, provenance and the plane-id
-    cross-check.
+    fields are identifiers used for logging and provenance.
     """
 
     frame_rate: Optional[float] = None
@@ -71,7 +77,7 @@ def load_decrosstalk_metadata(
     """Read v1/v2 metadata for decrosstalk from ``input_dir``.
 
     The core-file location, schema-version dispatch and sibling loads all come
-    from the shared ``load_common`` preamble. ``frame_rate`` falls back to
+    from the shared :meth:`CoreMetadata.load`. ``frame_rate`` falls back to
     ``platform.json`` and then to ``cli_frame_rate``; it is only fatal when
     ``require_frame_rate`` is set, since decrosstalk needs a rate solely to
     size the debug truncation.
@@ -94,75 +100,22 @@ def load_decrosstalk_metadata(
     Raises
     ------
     FileNotFoundError
-        If neither ``acquisition.json`` nor ``session.json`` is found.
+        If no core metadata file is found.
     ValueError
-        If both core files are present (ambiguous input), or if
+        If both v1 and v2 core files are present (ambiguous input), or if
         ``require_frame_rate`` and no source supplies one.
     """
-    input_dir = Path(input_dir)
-    common = io.load_common(input_dir)
+    core = CoreMetadata.load(Path(input_dir))
     return DecrosstalkMetadata(
-        frame_rate=fields.resolve_frame_rate(
-            common.version,
-            common.core_raw,
-            common.platform_raw,
-            core_file=common.core_path,
-            input_dir=input_dir,
+        frame_rate=core.get_frame_rate(
             cli_override=cli_frame_rate,
             required=require_frame_rate,
         ),
-        instrument_id=fields.get_instrument_id(
-            common.version, common.core_raw
-        ),
-        subject_id=fields.get_subject_id(
-            common.core_raw, common.subject_raw
-        ),
-        dataset_name=fields.get_dataset_name(common.data_description_raw),
-        fov_ids=fields.get_fov_ids(common.version, common.core_raw),
+        instrument_id=core.get_instrument_id(),
+        subject_id=core.get_subject_id(),
+        dataset_name=core.get_dataset_name(),
+        fov_ids=core.get_fov_ids(),
     )
-
-
-def validate_pair_ids(
-    scavenged: Iterable[str],
-    canonical: Iterable[str],
-) -> bool:
-    """Warn when a pair's directory-scavenged plane ids are not canonical.
-
-    Decrosstalk scavenges its two plane ids from the staged ``pair*/<id>``
-    directory names. It sees one pair out of the session's planes, so the
-    canonical set is compared *restricted to that pair*: a whole-session
-    comparison would report a divergence on every multiplane run, which is
-    noise rather than signal. An id absent from the canonical set survives the
-    restriction and is what the warning names.
-
-    Never raises: uniqueness is the hard requirement and the directory names
-    already guarantee it, so canonicality only buys readability.
-
-    Parameters
-    ----------
-    scavenged : iterable of str
-        The pair's plane ids, taken from the input directory layout.
-    canonical : iterable of str
-        Every canonical plane id of the session (see
-        :func:`aind_pophys_metadata.fields.get_fov_ids`).
-
-    Returns
-    -------
-    bool
-        ``True`` when the scavenged ids are all canonical, or when the
-        metadata yielded no canonical ids to compare against.
-    """
-    scavenged = list(scavenged)
-    canonical = list(canonical)
-    if not canonical:
-        logger.warning(
-            "No canonical plane ids in the acquisition metadata; keeping the "
-            "scavenged ids %s unchecked.",
-            sorted(scavenged),
-        )
-        return True
-    expected = [name for name in canonical if name in set(scavenged)]
-    return fields.validate_scavenged_ids(scavenged, expected, logger)
 
 
 def process_name(plane_id: Optional[str]) -> Optional[str]:
@@ -421,8 +374,8 @@ def build_code(
     """Construct the decrosstalk ``Code`` block.
 
     Code identity comes from the backing library: the shared builder reads
-    the installed ``LIBRARY_NAME`` distribution for the version and derives
-    the url from it, so the two always describe one artifact.
+    the installed ``LIBRARY_NAME`` distribution for the version, which is
+    paired with this repo's own :data:`REPO_URL`.
 
     Parameters
     ----------
@@ -439,6 +392,7 @@ def build_code(
     return shared_processing.build_code(
         name=CODE_NAME,
         library_name=LIBRARY_NAME,
+        url=REPO_URL,
         parameters=parameters,
         input_data=input_data,
     )

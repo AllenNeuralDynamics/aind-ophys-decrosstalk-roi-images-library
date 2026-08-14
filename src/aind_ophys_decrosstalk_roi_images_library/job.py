@@ -23,7 +23,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import h5py as h5
 import numpy as np
 from aind_pophys_metadata import processing as shared_processing
-from aind_pophys_metadata.paths import find_one, relative_to_root
+from aind_pophys_metadata import find_one, relative_to_root
 from aind_pophys_metadata.runner import StageContext, stage_guard
 from log_schema.main import setup_logging
 
@@ -136,9 +136,8 @@ def _truncate_for_debug(
     requested = int(duration_s * float(frame_rate))
     with h5.File(h5_file, "r") as f:
         available = f["data"].shape[0]
-        # The slice clips silently, so log what is actually retained: the
-        # converter caps every plane's movie in a debug run, which left the
-        # logged target off by up to 38x from the frames really processed.
+        # The slice clips silently, and the converter has already capped every
+        # plane's movie in a debug run, so log what is actually retained.
         n_frames = min(requested, available)
         if requested > available:
             logger.warning(
@@ -351,8 +350,8 @@ def _decrosstalk_plane(
         reports partial provenance even when this raises.
     model_files : list of dict
         Cellpose model provenance resolved before the run; empty when the
-        weights were not present locally, in which case Cellpose downloaded
-        them and they are described here instead.
+        weights were not present locally, in which case they are re-read
+        afterwards and recorded as a network source.
     """
     num_frames = settings.resolved_num_frames()
     signal_movie = _registered_movie(pair_dir, oeid)
@@ -502,9 +501,9 @@ def _run_decrosstalk_pair(
     Path(settings.tmp_dir).mkdir(parents=True, exist_ok=True)
 
     # Both planes were registered by the same upstream motion-correction run,
-    # so one read supplies the settings for the pair.
-    # Resolved: the pair entries are symlinks created by code/run, and rglob
-    # does not descend through symlinks on Python <= 3.12.
+    # so one read supplies the settings for the pair. Resolved first: the pair
+    # entries are symlinks created by code/run, and rglob does not descend
+    # through symlinks on Python <= 3.12.
     suite2p_params = mu.resolve_suite2p_params(
         (pair_dir / oeid1).resolve(),
         nonrigid_override=settings.nonrigid,
@@ -687,7 +686,6 @@ def run(settings: Optional[DecrosstalkSettings] = None) -> None:
             )
             raise
         logger.info("Decrosstalking pair %s / %s from %s", *oeids, pair_dir)
-        mu.validate_pair_ids(oeids, metadata.fov_ids)
 
         output_dirs = {
             oeid: _make_output_dir(results_root, oeid) for oeid in oeids

@@ -2,9 +2,8 @@
 
 The logged frame count has to be the one actually retained. In a debug run the
 converter has already capped each plane's movie (100 frames), so a seconds-
-based target computed from the frame rate can be far larger than the dataset;
-``f["data"][:n]`` then clips silently and the log claimed up to 38x more frames
-than any stage processed.
+based target computed from the frame rate can be far larger than the dataset,
+and ``f["data"][:n]`` clips it silently.
 """
 
 import unittest
@@ -31,7 +30,7 @@ def _write_movie(path: Path, n_frames: int) -> Path:
 class TestTruncateForDebug(unittest.TestCase):
     """The truncation reports the effective frame count, never the intent."""
 
-    def test_target_beyond_the_dataset_is_capped_and_warned(self):
+    def test_target_beyond_the_dataset_is_capped_and_warned(self) -> None:
         """An already-capped movie logs its real length, not the request."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -49,7 +48,7 @@ class TestTruncateForDebug(unittest.TestCase):
         self.assertIn("upstream debug cap", message)
         self.assertIn(str(UPSTREAM_DEBUG_FRAMES), message)
 
-    def test_target_inside_the_dataset_truncates_without_warning(self):
+    def test_target_inside_the_dataset_truncates_without_warning(self) -> None:
         """The ordinary case still retains duration_s of frames."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

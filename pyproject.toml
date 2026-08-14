@@ -39,17 +39,17 @@ version = "0.0.0"
 #   0.14.6 is also the release that fixes suite2p's Python 3.11+ import, which
 #   is why requires-python is capped at <3.11 above. Dropping cellpose (as the
 #   speed-up branch does) is what would let both caps be lifted.
-# - scikit-image is NOT held at the v1 capsule's 0.21.0. That version has no
-#   cp312 wheel (CI tests 3.12) and aind-ophys-utils>=0.2.0 requires >=0.24.
+# - scikit-image is NOT held at the v1 capsule's 0.21.0, because
+#   aind-ophys-utils>=0.2.0 requires scikit-image>=0.24.
 #   The only function used, metrics.normalized_mutual_information, is
 #   numerically identical in 0.21.0 and 0.26.0 (formatting-only diff), so the
 #   bump does not move the fitted coefficients.
 dependencies = [
-    # These two move together: 2.8.1 pins models==5.7.3 exactly, 2.9.0 needs
+    # These two move together: aind-data-schema 2.9.0 requires models
     # >=6.1.0,<7, so bumping one alone leaves the environment unresolvable.
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@123f5cf25ca3a12b572bbba58c6449814d41f19f",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@b473a1e5288096c48e47d2bf03cb24d48ef46b50",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     "aind-ophys-utils>=0.2.0",
     "cellpose==2.2.3",
