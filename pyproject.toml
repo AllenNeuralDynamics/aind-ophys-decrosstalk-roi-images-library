@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aind-ophys-decrosstalk-roi-images-library"
-description = "Generated from aind-library-template"
+description = "Paired-plane crosstalk removal for AIND population ophys"
 license = "MIT"
-requires-python = ">=3.10"
+# Pinned to 3.10 by suite2p==0.14.3
+requires-python = ">=3.10,<3.11"
 authors = [
     {name = "Allen Institute for Neural Dynamics"}
 ]
@@ -17,6 +18,19 @@ readme = "README.md"
 version = "0.0.0"
 
 dependencies = [
+    "aind-data-schema==2.9.0",
+    "aind-data-schema-models==6.2.0",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.2.0",
+    "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
+    "aind-ophys-utils==0.2.0",
+    "cellpose==2.2.3",
+    "suite2p==0.14.3",
+    "numpy==1.26.4",
+    "pandas==2.3.3",
+    "h5py==3.16.0",
+    "matplotlib==3.10.9",
+    "pydantic==2.11.10",
+    "pydantic-settings==2.14.2",
 ]
 
 [dependency-groups]
@@ -56,7 +70,12 @@ exclude = '''
 '''
 
 [tool.coverage.run]
-omit = ["*__init__*"]
+omit = [
+    "*__init__*",
+    "*/decrosstalk.py",
+    "*/paired_plane_registration.py",
+    "*/job.py",
+]
 source = ["aind_ophys_decrosstalk_roi_images_library", "tests"]
 
 [tool.coverage.report]
