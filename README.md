@@ -42,7 +42,7 @@ from aind_ophys_decrosstalk_roi_images_library.settings import (
     DecrosstalkSettings,
 )
 
-run(DecrosstalkSettings(debug=True, verify=True))
+run(DecrosstalkSettings(debug=True))
 ```
 
 ## Modules
@@ -51,10 +51,11 @@ run(DecrosstalkSettings(debug=True, verify=True))
 
 Orchestration. `run()` is the entry point: metadata read, logging setup, pair
 resolution (`_locate_pair`), the paired-plane re-registration of each raw movie,
-the coefficient fit, the unmixed-movie write (`_write_decrosstalk_movie`), and
-the per-plane `processing.json` / `quality_control.json` emission via the shared
-`stage_guard`. The large paired-registered intermediates are written to
-`tmp_dir` and deleted however the run ends.
+the coefficient fit, the unmixed-movie write (`_write_decrosstalk_movie`), the
+per-pair coupled-FOV image (`_coupled_fov_metric`), and the per-plane
+`processing.json` (via the shared `stage_guard`) and `quality_control.json`
+emission. The large paired-registered intermediates are written to `tmp_dir` and
+deleted however the run ends.
 
 ### `decrosstalk.py`
 
@@ -87,10 +88,19 @@ without cellpose, suite2p or `aind-data-schema`.
 
 ### `qc.py`
 
-Capsule-specific QC metric content (`build_decrosstalk_metric`) over the shared
-`aind_pophys_metadata` builders. One pending dropdown metric per plane, asking a
-reviewer to confirm the paired-plane signal was removed without artifacts; one
-`quality_control.json` is written per plane.
+Decrosstalk QC metric content over the shared `aind_pophys_metadata` builders:
+
+- `build_decrosstalk_metric`: one pending dropdown metric per plane, asking a
+  reviewer to confirm the paired-plane signal was removed without artifacts.
+- `build_coupled_fov_metric`: one pending dropdown metric per pair
+  (`Op. QC: Crosstalk`), referencing the two planes' decrosstalked max
+  projections side by side (`write_coupled_fov_image`) to check for residual
+  cross-talk or time series assigned to the wrong plane. It is written only
+  into the lower-indexed plane's document (`order_pair_by_plane_index`, by
+  position in the session's plane-index-ordered plane ids), so the run-level
+  aggregate holds it once.
+
+One `quality_control.json` is written per plane.
 
 ### `utils/metadata_utils.py`
 
@@ -142,6 +152,10 @@ Written into `<results>/<plane_id>/decrosstalk/` for **each** plane of the pair:
 | `*_avg_img.png`, `*_max_img.png` | average and maximum projections, one pair per reduced movie |
 | `processing.json` | full `Processing` document for this plane |
 | `quality_control.json` | full `QualityControl` document for this plane |
+
+The lower-indexed plane of the pair also holds
+`<lower_plane_id>_<higher_plane_id>_coupled_fov_max.png`, the coupled-FOV QC
+reference, and its `quality_control.json` carries the pair's coupled-FOV metric.
 
 The fitted coefficients also ride on the `processing.json` as `alpha_mean`,
 `beta_mean`, `num_epochs` and the resolved upstream `block_size` / `nonrigid`.
