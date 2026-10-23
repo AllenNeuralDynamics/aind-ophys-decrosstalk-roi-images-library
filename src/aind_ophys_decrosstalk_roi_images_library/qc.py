@@ -6,8 +6,9 @@ wrapper with the project-standard ``default_grouping``, and the writer all
 live in the shared library. ``job.run`` accumulates the metrics built here and
 emits ONE full ``quality_control.json`` per plane (never per-metric files).
 
-Each pair also gets one coupled-FOV metric. It lives in the lower-indexed
-plane's document only, so the run-level aggregate holds it exactly once.
+Each pair gets one coupled-FOV metric. It lives in the lower-indexed plane's
+document only, so the run-level aggregate holds it exactly once; the
+higher-indexed plane's document holds no metrics.
 """
 
 from pathlib import Path
@@ -22,41 +23,8 @@ from aind_pophys_metadata import quality_control as shared_qc
 from matplotlib.figure import Figure
 from matplotlib.image import imread
 
-COUPLED_FOV_EVALUATION = "Op. QC: Crosstalk"
+COUPLED_FOV_EVALUATION = "Crosstalk"
 COUPLED_FOV_IMAGE_DPI = 150
-
-
-def build_decrosstalk_metric(
-    unique_id: str,
-    reference_filepath: str,
-) -> QCMetric:
-    """Construct the decrosstalk QCMetric for one plane.
-
-    Parameters
-    ----------
-    unique_id : str
-        Plane/FOV id used in the metric name.
-    reference_filepath : str
-        Path to the decrosstalk episodic-mean-FOV movie, relative to the
-        asset.
-
-    Returns
-    -------
-    QCMetric
-        The decrosstalk metric (pending review).
-    """
-    return shared_qc.dropdown_metric(
-        name=f"{unique_id} Decrosstalk",
-        evaluation="Decrosstalk",
-        options=["Reasonable", "Unreasonable"],
-        status=[Status.PASS, Status.FAIL],
-        reference=reference_filepath,
-        description=(
-            "Review the episodic mean FOV of the decrosstalk movie to ensure "
-            "the paired-plane signal has been removed without introducing "
-            "artifacts."
-        ),
-    )
 
 
 def order_pair_by_plane_index(
@@ -165,9 +133,8 @@ def build_coupled_fov_metric(
         status=[Status.PASS, Status.FAIL, Status.FAIL],
         reference=reference_filepath,
         description=(
-            f"Side-by-side max projections of coupled planes {lower_id} and "
-            f"{higher_id} after decrosstalk. Check for residual cross-talk "
-            f"and for time series assigned to the wrong plane."
+            "Maximum projections of the two coupled planes after "
+            "decrosstalk. Check for residual crosstalk between them."
         ),
     )
 

@@ -349,7 +349,7 @@ def _decrosstalk_plane(
     suite2p_params: dict,
     plane_ctx: StageContext,
     model_files: List[Dict[str, str]],
-) -> QCMetric:
+) -> None:
     """Fit and apply the mixing coefficients for a single plane.
 
     Parameters
@@ -377,11 +377,6 @@ def _decrosstalk_plane(
         Cellpose model provenance resolved before the run; empty when the
         weights were not present locally, in which case they are re-read
         afterwards and recorded as a network source.
-
-    Returns
-    -------
-    QCMetric
-        This plane's decrosstalk metric, for the caller to write.
     """
     num_frames = settings.resolved_num_frames()
     signal_movie = _registered_movie(pair_dir, oeid)
@@ -461,39 +456,6 @@ def _decrosstalk_plane(
         num_frames=num_frames,
         save_webm=True,
     )
-    return _decrosstalk_metric(settings, output_dir, oeid, decrosstalk_fn)
-
-
-def _decrosstalk_metric(
-    settings: DecrosstalkSettings,
-    output_dir: Path,
-    oeid: str,
-    decrosstalk_fn: Path,
-) -> QCMetric:
-    """Build this plane's decrosstalk metric.
-
-    Parameters
-    ----------
-    settings : DecrosstalkSettings
-        Parsed settings, providing the results root.
-    output_dir : Path
-        This plane's output directory.
-    oeid : str
-        Ophys experiment (plane) id.
-    decrosstalk_fn : Path
-        The written decrosstalk movie, whose episodic-mean-FOV webm is the
-        QC reference.
-
-    Returns
-    -------
-    QCMetric
-        The plane's decrosstalk metric.
-    """
-    reference = relative_to_root(
-        Path(settings.output_dir).resolve(),
-        output_dir / f"{decrosstalk_fn.stem}_episodic_mean_fov.webm",
-    )
-    return qc.build_decrosstalk_metric(oeid, reference)
 
 
 def _coupled_fov_metric(
@@ -602,25 +564,23 @@ def _run_decrosstalk_pair(
             num_frames=settings.resolved_num_frames(),
         )
 
-    metrics: Dict[str, List[QCMetric]] = {}
     for oeid, paired_oeid in ((oeid1, oeid2), (oeid2, oeid1)):
-        metrics[oeid] = [
-            _decrosstalk_plane(
-                settings,
-                pair_dir,
-                oeid,
-                paired_oeid,
-                output_dirs[oeid],
-                cached_movies[paired_oeid],
-                cached_emf[paired_oeid],
-                suite2p_params,
-                contexts[oeid],
-                model_files,
-            )
-        ]
+        _decrosstalk_plane(
+            settings,
+            pair_dir,
+            oeid,
+            paired_oeid,
+            output_dirs[oeid],
+            cached_movies[paired_oeid],
+            cached_emf[paired_oeid],
+            suite2p_params,
+            contexts[oeid],
+            model_files,
+        )
 
     # One metric per pair, carried by the lower-indexed plane only, so the
     # run-level aggregate does not hold it twice.
+    metrics: Dict[str, List[QCMetric]] = {oeid: [] for oeid in oeids}
     metrics[lower].append(
         _coupled_fov_metric(settings, output_dirs, lower, higher)
     )
