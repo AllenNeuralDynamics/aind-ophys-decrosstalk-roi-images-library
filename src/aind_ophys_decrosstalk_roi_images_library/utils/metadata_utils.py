@@ -29,16 +29,6 @@ from aind_pophys_metadata import processing as shared_processing
 
 logger = logging.getLogger(__name__)
 
-CODE_NAME = "aind-ophys-decrosstalk-roi-images"
-LIBRARY_NAME = "aind-ophys-decrosstalk-roi-images-library"
-
-# Only this repo knows where its own code lives, so the url is stated here
-# rather than derived from the library name.
-REPO_URL = (
-    "https://github.com/AllenNeuralDynamics/"
-    "aind-ophys-decrosstalk-roi-images-library"
-)
-
 PROCESS_TYPE = ProcessName.VIDEO_PLANE_DECROSSTALK
 
 # Cellpose's own convention for where it looks for (and caches) weights. The
@@ -344,10 +334,6 @@ def build_code(
 ) -> Code:
     """Construct the decrosstalk ``Code`` block.
 
-    Code identity comes from the backing library: the shared builder reads
-    the installed ``LIBRARY_NAME`` distribution for the version, which is
-    paired with this repo's own :data:`REPO_URL`.
-
     Parameters
     ----------
     parameters : dict
@@ -358,12 +344,11 @@ def build_code(
     Returns
     -------
     Code
-        The populated code block.
+        The populated code block; name, version and url are this library's
+        installed package metadata.
     """
     return shared_processing.build_code(
-        name=CODE_NAME,
-        library_name=LIBRARY_NAME,
-        url=REPO_URL,
+        __name__,
         parameters=parameters,
         input_data=input_data,
     )

@@ -14,6 +14,8 @@ from aind_ophys_decrosstalk_roi_images_library.utils import (
     metadata_utils as mu,
 )
 
+LIBRARY = "aind-ophys-decrosstalk-roi-images-library"
+
 V1_SESSION = {
     "subject_id": "999999",
     "rig_id": "MESO.1",
@@ -275,15 +277,16 @@ class TestBuildCode(unittest.TestCase):
         """The backing library, not the wrapper, identifies the artifact."""
         code = mu.build_code({"debug": False})
         self.assertNotEqual(code.version, "15.0.0")
-        self.assertEqual(code.version, version(mu.LIBRARY_NAME))
+        self.assertEqual(code.version, version(LIBRARY))
 
-    def test_version_and_url_identify_the_backing_library(self) -> None:
-        """code.version and code.url must name one artifact."""
+    def test_identity_is_the_installed_library(self) -> None:
+        """name, version and url all describe this library's package."""
         code = mu.build_code({})
-        self.assertEqual(code.version, version(mu.LIBRARY_NAME))
-        self.assertIn(mu.LIBRARY_NAME, code.url)
-        # The landing page, not a branch or a subdirectory.
-        self.assertNotIn("/tree/", code.url)
+        self.assertEqual(code.name, LIBRARY)
+        self.assertEqual(code.version, version(LIBRARY))
+        self.assertEqual(
+            code.url, f"https://github.com/AllenNeuralDynamics/{LIBRARY}"
+        )
 
     def test_records_input_data(self) -> None:
         """Input provenance is carried on the code block."""
