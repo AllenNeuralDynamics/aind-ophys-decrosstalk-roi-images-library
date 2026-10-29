@@ -22,6 +22,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import h5py as h5
 import numpy as np
+from aind_data_schema.core.quality_control import QCMetric
 from aind_pophys_metadata import processing as shared_processing
 from aind_pophys_metadata import find_one, relative_to_root
 from aind_pophys_metadata.runner import StageContext, stage_guard
@@ -455,37 +456,44 @@ def _decrosstalk_plane(
         num_frames=num_frames,
         save_webm=True,
     )
-    _write_quality_control(settings, output_dir, oeid, decrosstalk_fn)
 
 
-def _write_quality_control(
+def _coupled_fov_metric(
     settings: DecrosstalkSettings,
-    output_dir: Path,
-    oeid: str,
-    decrosstalk_fn: Path,
-) -> None:
-    """Emit one full quality_control.json for this plane.
+    output_dirs: Dict[str, Path],
+    lower: str,
+    higher: str,
+) -> QCMetric:
+    """Write the pair's side-by-side max projections and build its metric.
+
+    The image is written into the lower-indexed plane's output directory,
+    next to the document that carries the metric.
 
     Parameters
     ----------
     settings : DecrosstalkSettings
         Parsed settings, providing the results root.
-    output_dir : Path
-        This plane's output directory.
-    oeid : str
-        Ophys experiment (plane) id.
-    decrosstalk_fn : Path
-        The written decrosstalk movie, whose episodic-mean-FOV webm is the
-        QC reference.
+    output_dirs : dict of str to Path
+        Each plane's output directory, holding its decrosstalk max projection.
+    lower : str
+        Lower-indexed plane id.
+    higher : str
+        Higher-indexed plane id.
+
+    Returns
+    -------
+    QCMetric
+        The pair's coupled-FOV metric.
     """
-    reference = relative_to_root(
-        Path(settings.output_dir).resolve(),
-        output_dir / f"{decrosstalk_fn.stem}_episodic_mean_fov.webm",
+    image = qc.write_coupled_fov_image(
+        [
+            (plane, output_dirs[plane] / f"{plane}_decrosstalk_max_img.png")
+            for plane in (lower, higher)
+        ],
+        output_dirs[lower] / f"{lower}_{higher}_coupled_fov_max.png",
     )
-    metric = qc.build_decrosstalk_metric(oeid, reference)
-    qc.write_quality_control_json(
-        qc.build_quality_control([metric]), output_dir
-    )
+    reference = relative_to_root(Path(settings.output_dir).resolve(), image)
+    return qc.build_coupled_fov_metric(lower, higher, reference)
 
 
 def _run_decrosstalk_pair(
@@ -522,6 +530,9 @@ def _run_decrosstalk_pair(
         Cellpose model provenance resolved before the run.
     """
     oeid1, oeid2 = oeids
+    # Resolved before any compute so a pair absent from the metadata fails in
+    # seconds rather than after registration.
+    lower, higher = qc.order_pair_by_plane_index(oeids, metadata.fov_ids)
     Path(settings.tmp_dir).mkdir(parents=True, exist_ok=True)
 
     # Both planes were registered by the same upstream motion-correction run,
@@ -565,6 +576,17 @@ def _run_decrosstalk_pair(
             suite2p_params,
             contexts[oeid],
             model_files,
+        )
+
+    # One metric per pair, carried by the lower-indexed plane only, so the
+    # run-level aggregate does not hold it twice.
+    metrics: Dict[str, List[QCMetric]] = {oeid: [] for oeid in oeids}
+    metrics[lower].append(
+        _coupled_fov_metric(settings, output_dirs, lower, higher)
+    )
+    for oeid in oeids:
+        qc.write_quality_control_json(
+            qc.build_quality_control(metrics[oeid]), output_dirs[oeid]
         )
 
 

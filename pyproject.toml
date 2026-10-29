@@ -20,7 +20,7 @@ version = "0.0.0"
 dependencies = [
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.2.0",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.3.0",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     "aind-ophys-utils==0.2.0",
     "cellpose==2.2.3",
@@ -32,6 +32,9 @@ dependencies = [
     "pydantic==2.11.10",
     "pydantic-settings==2.14.2",
 ]
+
+[project.urls]
+Repository = "https://github.com/AllenNeuralDynamics/aind-ophys-decrosstalk-roi-images-library"
 
 [dependency-groups]
 dev = [

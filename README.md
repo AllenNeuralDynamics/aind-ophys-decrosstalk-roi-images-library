@@ -42,7 +42,7 @@ from aind_ophys_decrosstalk_roi_images_library.settings import (
     DecrosstalkSettings,
 )
 
-run(DecrosstalkSettings(debug=True, verify=True))
+run(DecrosstalkSettings(debug=True))
 ```
 
 ## Modules
@@ -51,10 +51,11 @@ run(DecrosstalkSettings(debug=True, verify=True))
 
 Orchestration. `run()` is the entry point: metadata read, logging setup, pair
 resolution (`_locate_pair`), the paired-plane re-registration of each raw movie,
-the coefficient fit, the unmixed-movie write (`_write_decrosstalk_movie`), and
-the per-plane `processing.json` / `quality_control.json` emission via the shared
-`stage_guard`. The large paired-registered intermediates are written to
-`tmp_dir` and deleted however the run ends.
+the coefficient fit, the unmixed-movie write (`_write_decrosstalk_movie`), the
+per-pair coupled-FOV image (`_coupled_fov_metric`), and the per-plane
+`processing.json` (via the shared `stage_guard`) and `quality_control.json`
+emission. The large paired-registered intermediates are written to `tmp_dir` and
+deleted however the run ends.
 
 ### `decrosstalk.py`
 
@@ -75,8 +76,8 @@ Re-registration of one plane's raw movie with its partner's suite2p offsets:
 the motion-transform CSV reader (`get_s2p_motion_transform`), the rigid roll
 (`shift_frame`), the chunked re-registration (`paired_plane_cached_movie`), and
 the chunked projections and episodic-mean-FOV reduction
-(`projection_process_chunked`, `episodic_mean_fov`) used both as the fit input
-and as the QC reference movie.
+(`projection_process_chunked`, `episodic_mean_fov`) used as the fit input and
+to write the unmixed movie's projections and episodic-mean-FOV video.
 
 ### `settings.py`
 
@@ -87,10 +88,17 @@ without cellpose, suite2p or `aind-data-schema`.
 
 ### `qc.py`
 
-Capsule-specific QC metric content (`build_decrosstalk_metric`) over the shared
-`aind_pophys_metadata` builders. One pending dropdown metric per plane, asking a
-reviewer to confirm the paired-plane signal was removed without artifacts; one
-`quality_control.json` is written per plane.
+Coupled-FOV QC metric content over the shared `aind_pophys_metadata` builders.
+`build_coupled_fov_metric` makes one pending dropdown metric per pair
+(`Crosstalk` group), referencing the two planes' decrosstalked max projections
+side by side (`write_coupled_fov_image`) to check for residual cross-talk or
+time series assigned to the wrong plane. It is written only into the
+lower-indexed plane's document (`order_pair_by_plane_index`, by position in the
+session's plane-index-ordered plane ids), so the run-level aggregate holds it
+once.
+
+One `quality_control.json` is written per plane; the higher-indexed plane's
+holds no metrics.
 
 ### `utils/metadata_utils.py`
 
@@ -136,12 +144,17 @@ Written into `<results>/<plane_id>/decrosstalk/` for **each** plane of the pair:
 |---|---|
 | `<plane_id>_decrosstalk.h5` | unmixed int16 movie (`data`, with `alpha`/`beta` attributes) plus the per-epoch `alpha_list`, `beta_list` and `mean_norm_mi_list` datasets |
 | `<plane_id>_decrosstalk_episodic_mean_fov.h5` | per-epoch mean images of the unmixed movie |
-| `<plane_id>_decrosstalk_episodic_mean_fov.webm` | the QC reference movie |
+| `<plane_id>_decrosstalk_episodic_mean_fov.webm` | per-epoch mean images of the unmixed movie, as a video |
 | `<plane_id>_registered_episodic_mean_fov.h5` | per-epoch mean images of this plane's own motion-corrected movie |
 | `<plane_id>_registered_to_pair_episodic_mean_fov.h5` | per-epoch mean images of this plane's raw movie warped into its partner's frame |
 | `*_avg_img.png`, `*_max_img.png` | average and maximum projections, one pair per reduced movie |
 | `processing.json` | full `Processing` document for this plane |
 | `quality_control.json` | full `QualityControl` document for this plane |
+
+The lower-indexed plane of the pair also holds
+`<lower_plane_id>_<higher_plane_id>_coupled_fov_max.png`, the coupled-FOV QC
+reference, and its `quality_control.json` carries the pair's coupled-FOV metric.
+The higher-indexed plane's `quality_control.json` holds no metrics.
 
 The fitted coefficients also ride on the `processing.json` as `alpha_mean`,
 `beta_mean`, `num_epochs` and the resolved upstream `block_size` / `nonrigid`.
