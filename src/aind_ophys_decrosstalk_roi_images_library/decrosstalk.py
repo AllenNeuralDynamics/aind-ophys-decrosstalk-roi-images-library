@@ -1,256 +1,317 @@
+"""Mixing-coefficient estimation and unmixing for paired-plane crosstalk.
+
+Two simultaneously-imaged mesoscope planes bleed into each other. The mixing
+is modelled as ``[[1-alpha, beta], [alpha, 1-beta]]``; ``alpha`` and ``beta``
+are fitted per epoch by minimising the normalised mutual information between
+the two planes' reconstructed ROI images, then averaged and applied to the
+full movie.
+
+ROIs are detected with Cellpose on the episodic mean FOV images. Cellpose
+looks for its weights under ``CELLPOSE_LOCAL_MODELS_PATH`` first and downloads
+them when they are absent. Which bytes were used is recorded in the emitted
+``code.parameters`` by ``metadata_utils.cellpose_model_provenance``.
+"""
+
+import logging
 from pathlib import Path
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 import h5py
-import matplotlib
-import matplotlib.pyplot as plt
+import matplotlib as mpl
 import numpy as np
 import pandas as pd
 import skimage
 from cellpose import models as cp_models
 
-from cellpose import utils
+mpl.use("Agg")
+from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.axes import Axes  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
 
-def _override_to_fail_download_func(*args, **kwargs):
-    raise RuntimeError("Network access attempted for model download")
+logger = logging.getLogger(__name__)
 
-utils.download_url_to_file = _override_to_fail_download_func
+DEFAULT_PIXEL_SIZE_UM = 0.78
+DEFAULT_DENDRITE_DIAMETER_UM = 10.0
+DEFAULT_NUM_TOP_ROIS = 15
+DEFAULT_OVERLAP_THRESHOLD = 0.7
+DEFAULT_MOTION_BUFFER = 5
+DEFAULT_GRID_INTERVAL = 0.01
+DEFAULT_MAX_GRID_VAL = 0.3
 
-def get_motion_correction_crop_xy_range_from_both_planes(
-    oeid: int, paired_id: int, input_dir: Path
-) -> Tuple[list, list]:
-    """Get x-y ranges to crop motion-correction frame rolling from both planes
-
-    TODO: when nonrigid registration parameter setting is done,
-    include nonrigid shift max into the calculation.
-
-    Parameters
-    ----------
-    oeid : int
-        ophys experiment ID
-    paired_id : int
-        ophys experiment ID of the paired plane
-    input_dir : Path
-        path to input directory
-
-    Returns
-    -------
-    list, list
-        Lists of y range and x range, [start, end] pixel index
-    """
-    xrange_og, yrange_og = get_motion_correction_crop_xy_range(oeid, input_dir)
-    xrange_paired, yrange_paired = get_motion_correction_crop_xy_range(
-        paired_id, input_dir
-    )
-
-    xrange = [max(xrange_og[0], xrange_paired[0]), min(xrange_og[1], xrange_paired[1])]
-    yrange = [max(yrange_og[0], yrange_paired[0]), min(yrange_og[1], yrange_paired[1])]
-
-    return xrange, yrange
+# Border band, inside the already motion-cropped image, whose ROIs are
+# discarded. Distinct from DEFAULT_MOTION_BUFFER (which crops the image
+# itself) even though both happen to be 5 pixels.
+DEFAULT_ROI_BORDER_BUFFER = 5
 
 
 def get_motion_correction_crop_xy_range(
-    oeid: int, input_dir: Path
-) -> Tuple[list, list]:
-    """Get x-y ranges to crop motion-correction frame rolling
-
-    TODO: move to utils
+    oeid: str, pair_dir: Path
+) -> Tuple[List[int], List[int]]:
+    """Get x-y ranges that crop away motion-correction frame rolling.
 
     Parameters
     ----------
-    oeid : int
-        ophys experiment ID
-    input_dir : Path
-        path to input directory
+    oeid : str
+        Ophys experiment (plane) id.
+    pair_dir : Path
+        Directory containing ``<oeid>/motion_correction/`` for both planes.
+
     Returns
     -------
-    list, list
-        Lists of y range and x range, [start, end] pixel index
+    tuple of list of int
+        ``(range_y, range_x)``, each ``[start, end]`` pixel index.
     """
-    # TODO: validate in case where max < 0 or min > 0 (if there exists an example)
-    suite2p_rigid_motion_transform_csv = (
-        input_dir / oeid / "motion_correction" / f"{oeid}_motion_transform.csv"
+    motion_transform_csv = (
+        Path(pair_dir)
+        / oeid
+        / "motion_correction"
+        / f"{oeid}_motion_transform.csv"
     )
-    motion_df = pd.read_csv(
-        suite2p_rigid_motion_transform_csv
-    )  # this is suite2p rigid motion transform csv file
+    motion_df = pd.read_csv(motion_transform_csv)
     max_y = np.ceil(max(motion_df.y.max(), 1)).astype(int)
     min_y = np.floor(min(motion_df.y.min(), 0)).astype(int)
     max_x = np.ceil(max(motion_df.x.max(), 1)).astype(int)
     min_x = np.floor(min(motion_df.x.min(), 0)).astype(int)
-    range_y = [-min_y, -max_y]
-    range_x = [-min_x, -max_x]
-    return range_y, range_x
+    return [-min_y, -max_y], [-min_x, -max_x]
+
+
+def get_motion_correction_crop_xy_range_from_both_planes(
+    oeid: str, paired_id: str, pair_dir: Path
+) -> Tuple[List[int], List[int]]:
+    """Intersect both planes' motion-correction crop ranges.
+
+    Parameters
+    ----------
+    oeid : str
+        Ophys experiment (plane) id of the signal plane.
+    paired_id : str
+        Ophys experiment (plane) id of the paired plane.
+    pair_dir : Path
+        Directory containing both planes' ``motion_correction`` output.
+
+    Returns
+    -------
+    tuple of list of int
+        ``(range_y, range_x)`` valid for both planes, each ``[start, end]``
+        pixel index.
+    """
+    yrange_og, xrange_og = get_motion_correction_crop_xy_range(oeid, pair_dir)
+    yrange_paired, xrange_paired = get_motion_correction_crop_xy_range(
+        paired_id, pair_dir
+    )
+    xrange = [
+        max(xrange_og[0], xrange_paired[0]),
+        min(xrange_og[1], xrange_paired[1]),
+    ]
+    yrange = [
+        max(yrange_og[0], yrange_paired[0]),
+        min(yrange_og[1], yrange_paired[1]),
+    ]
+    return yrange, xrange
 
 
 def decrosstalk_roi_image_from_episodic_mean_fov(
-    oeid: int,
-    paired_reg_fn: Path,
-    input_dir: Path,
-    pixel_size: float = 0.78,
-    grid_interval: float = 0.01,
-    max_grid_val: float = 0.3,
-    return_recon: float = False,
-) -> Tuple[np.array, list, list, list]:
-    """Get alpha and beta values for an experiment based on
-    the mutual information of the ROI images from motion corrected episodic mean FOV images
+    oeid: str,
+    paired_id: str,
+    paired_reg_emf_fn: Path,
+    pair_dir: Path,
+    signal_emf_fn: Path,
+    pixel_size: float = DEFAULT_PIXEL_SIZE_UM,
+    grid_interval: float = DEFAULT_GRID_INTERVAL,
+    max_grid_val: float = DEFAULT_MAX_GRID_VAL,
+    motion_buffer: int = DEFAULT_MOTION_BUFFER,
+    dendrite_diameter_um: float = DEFAULT_DENDRITE_DIAMETER_UM,
+    num_top_rois: int = DEFAULT_NUM_TOP_ROIS,
+    overlap_threshold: float = DEFAULT_OVERLAP_THRESHOLD,
+    cellpose_model_type: str = "cyto",
+    return_recon: bool = False,
+) -> Tuple[Optional[np.ndarray], list, list, list]:
+    """Fit mixing coefficients across every epoch of the mean FOV movies.
 
-    Parameters:
-    -----------
-    oeid : int
-        oeid of the signal plane
-    paired_reg_fn : Path
-        path to paired registration file
-        TODO: Once paired plane registration pipeline is finalized,
-        this parameter can be removed or replaced with paired_oeid
-    input_dir: Path
-        path to the input directory
-    pixel_size: float, optional
-        pixel size in um of imaging plane, (400pixelsx400pixels 512umx512um)
+    Parameters
+    ----------
+    oeid : str
+        Ophys experiment (plane) id of the signal plane.
+    paired_id : str
+        Ophys experiment (plane) id of the paired plane.
+    paired_reg_emf_fn : Path
+        Episodic mean FOV of the paired plane registered to this plane.
+    pair_dir : Path
+        Directory containing both planes' ``motion_correction`` output, used
+        for the motion-correction crop ranges.
+    signal_emf_fn : Path
+        Episodic mean FOV of this plane's own registered movie.
+    pixel_size : float, optional
+        Imaging plane pixel size [um].
     grid_interval : float, optional
-        interval of the grid, by default 0.01
+        Step of the alpha/beta grid search.
     max_grid_val : float, optional
-        maximum value of alpha and beta, by default 0.3
+        Maximum alpha/beta value searched.
+    motion_buffer : int, optional
+        Extra pixels cropped from each edge.
+    dendrite_diameter_um : float, optional
+        Diameter [um] below which a mask is discarded as dendrite.
+    num_top_rois : int, optional
+        Number of highest-intensity ROIs retained per plane.
+    overlap_threshold : float, optional
+        IoU above which two masks are treated as the same duplicated cell.
+    cellpose_model_type : str, optional
+        Cellpose pretrained model name.
     return_recon : bool, optional
-        whether to return the reconstructed signal and paired images, by default True
+        Also reconstruct the unmixed mean FOV stack using the averaged
+        coefficients. Off by default because this step unmixes the full
+        movie instead.
 
-    Returns:
-    -----------
-    alpha_list : list
-        list of alpha values across epochs
-    beta_list : list
-        list of beta values across epochs
-    mean_norm_mi_list : list
-        list of mean normalized mutual information values across epochs
+    Returns
+    -------
+    tuple
+        ``(recon_signal_data, alpha_list, beta_list, mean_norm_mi_list)``.
+        ``recon_signal_data`` is ``None`` unless ``return_recon``.
     """
-
-    # Assign start frames for each epoch
-    signal_fn = (
-        Path("../results")
-        / oeid
-        / "decrosstalk"
-        / f"{oeid}_registered_episodic_mean_fov.h5"
-    )
-    with h5py.File(signal_fn, "r") as f:
+    with h5py.File(signal_emf_fn, "r") as f:
         data_length = f["data"].shape[0]
-        signal_data = f["data"][()]
-    start_frames = range(data_length)
 
     alpha_list = []
     beta_list = []
     mean_norm_mi_list = []
-    for start_frame in start_frames:
+    for start_frame in range(data_length):
         (
             alpha,
             beta,
             mean_norm_mi_values,
         ) = decrosstalk_roi_image_single_pair_from_episodic_mean_fov(
             oeid,
-            paired_reg_fn,
-            input_dir,
+            paired_id,
+            paired_reg_emf_fn,
+            pair_dir,
+            signal_emf_fn,
             start_frame,
             pixel_size,
+            motion_buffer=motion_buffer,
             grid_interval=grid_interval,
             max_grid_val=max_grid_val,
+            dendrite_diameter_um=dendrite_diameter_um,
+            num_top_rois=num_top_rois,
+            overlap_threshold=overlap_threshold,
+            cellpose_model_type=cellpose_model_type,
         )
         alpha_list.append(alpha)
         beta_list.append(beta)
         mean_norm_mi_list.append(mean_norm_mi_values)
 
-    alpha = np.mean(alpha_list)
-    beta = np.mean(beta_list)
-
+    recon_signal_data = None
     if return_recon:
-        with h5py.File(signal_fn, "r") as f:
+        alpha = np.mean(alpha_list)
+        beta = np.mean(beta_list)
+        with h5py.File(signal_emf_fn, "r") as f:
             signal_data = f["data"][:]
-        with h5py.File(paired_reg_fn, "r") as f:
+        with h5py.File(paired_reg_emf_fn, "r") as f:
             paired_data = f["data"][:]
         recon_signal_data = np.zeros_like(signal_data)
         for i in range(data_length):
             recon_signal_data[i, :, :] = apply_mixing_matrix(
                 alpha, beta, signal_data[i, :, :], paired_data[i, :, :]
             )[0]
-    else:
-        recon_signal_data = None
     return recon_signal_data, alpha_list, beta_list, mean_norm_mi_list
 
 
 def decrosstalk_roi_image_single_pair_from_episodic_mean_fov(
-    oeid: int,
-    paired_reg_emf_fn: str,
-    input_dir: Path,
+    oeid: str,
+    paired_id: str,
+    paired_reg_emf_fn: Path,
+    pair_dir: Path,
+    signal_emf_fn: Path,
     start_frame: int,
     pix_size: float,
-    motion_buffer: int = 5,
-    grid_interval: float = 0.01,
-    max_grid_val: float = 0.3,
+    motion_buffer: int = DEFAULT_MOTION_BUFFER,
+    grid_interval: float = DEFAULT_GRID_INTERVAL,
+    max_grid_val: float = DEFAULT_MAX_GRID_VAL,
+    dendrite_diameter_um: float = DEFAULT_DENDRITE_DIAMETER_UM,
+    num_top_rois: int = DEFAULT_NUM_TOP_ROIS,
+    overlap_threshold: float = DEFAULT_OVERLAP_THRESHOLD,
+    cellpose_model_type: str = "cyto",
 ) -> Tuple[float, float, list]:
-    """Get alpha and beta values for a single pair of mean images
-    based on the mean normalized mutual information of the ROI images
+    """Fit mixing coefficients for a single epoch's pair of mean images.
 
-    Parameters:
-    -----------
-    oeid : int
-        ophys experiment id
-    paired_reg_emf_fn : str, Path
-        path to paired registration file
-        TODO: Once paired plane registration pipeline is finalized,
-        this parameter can be removed or replaced with paired_oeid
-    input_dir: Path
-        path to the input directory
-    start_frame: int
-        start frame of the mean images
-    pix_size = float
-        pixel size in um of imaging plane
+    Parameters
+    ----------
+    oeid : str
+        Ophys experiment (plane) id of the signal plane.
+    paired_id : str
+        Ophys experiment (plane) id of the paired plane.
+    paired_reg_emf_fn : Path
+        Episodic mean FOV of the paired plane registered to this plane.
+    pair_dir : Path
+        Directory containing both planes' ``motion_correction`` output.
+    signal_emf_fn : Path
+        Episodic mean FOV of this plane's own registered movie.
+    start_frame : int
+        Epoch index within the episodic mean FOV stacks.
+    pix_size : float
+        Imaging plane pixel size [um].
     motion_buffer : int, optional
-        number of pixels to crop from the nonrigid motion corrected image, by default 5
-        TODO: Get this from the suite2p parameters
+        Extra pixels cropped from each edge.
     grid_interval : float, optional
-        interval of the grid, by default 0.01
+        Step of the alpha/beta grid search.
     max_grid_val : float, optional
-        maximum value of alpha and beta, by default 0.3
+        Maximum alpha/beta value searched.
+    dendrite_diameter_um : float, optional
+        Diameter [um] below which a mask is discarded as dendrite.
+    num_top_rois : int, optional
+        Number of highest-intensity ROIs retained per plane.
+    overlap_threshold : float, optional
+        IoU above which two masks are treated as the same duplicated cell.
+    cellpose_model_type : str, optional
+        Cellpose pretrained model name.
 
-    Returns:
-    -----------
-    alpha : float
-        alpha value of the unmixing matrix
-    beta : float
-        beta value of the unmixing matrix
-    mean_norm_mi_values : np.array
-        mean normalized mutual information values
+    Returns
+    -------
+    tuple
+        ``(alpha, beta, mean_norm_mi_values)`` for this epoch.
     """
-    signal_fn = (
-        Path("../results")
-        / oeid
-        / "decrosstalk"
-        / f"{oeid}_registered_episodic_mean_fov.h5"
-    )
-    with h5py.File(signal_fn, "r") as f:
+    with h5py.File(signal_emf_fn, "r") as f:
         signal_mean = f["data"][start_frame : start_frame + 1].mean(axis=0)
     with h5py.File(paired_reg_emf_fn, "r") as f:
         paired_mean = f["data"][start_frame : start_frame + 1].mean(axis=0)
-    paired_id = paired_reg_emf_fn.parent.parent.name
-    p1y, p1x = get_motion_correction_crop_xy_range_from_both_planes(
-        oeid, paired_id, input_dir
-    )
-    signal_mean = signal_mean[
-        p1y[0] + motion_buffer : p1y[1] - motion_buffer,
-        p1x[0] + motion_buffer : p1x[1] - motion_buffer,
-    ]
-    paired_mean = paired_mean[
-        p1y[0] + motion_buffer : p1y[1] - motion_buffer,
-        p1x[0] + motion_buffer : p1x[1] - motion_buffer,
-    ]
 
-    # Get the top masks of the signal and paired planes
+    p1y, p1x = get_motion_correction_crop_xy_range_from_both_planes(
+        oeid, paired_id, pair_dir
+    )
+    crop = (
+        slice(p1y[0] + motion_buffer, p1y[1] - motion_buffer),
+        slice(p1x[0] + motion_buffer, p1x[1] - motion_buffer),
+    )
+    signal_mean = signal_mean[crop]
+    paired_mean = paired_mean[crop]
+
     signal_top_masks, paired_top_masks = get_signal_paired_top_masks(
-        signal_mean, paired_mean, pix_size=pix_size
-    )  # About 22 s
-    # Create bounding boxes
-    signal_bb_masks = get_bounding_box(signal_top_masks)
-    paired_bb_masks = get_bounding_box(paired_top_masks)
-    bb_masks = np.concatenate([signal_bb_masks, paired_bb_masks])
-    # Calculate raw mutual information for normalization
+        signal_mean,
+        paired_mean,
+        dendrite_diameter_um=dendrite_diameter_um,
+        pix_size=pix_size,
+        overlap_threshold=overlap_threshold,
+        num_top_rois=num_top_rois,
+        cellpose_model_type=cellpose_model_type,
+    )
+    bb_masks = np.concatenate(
+        [
+            get_bounding_box(signal_top_masks),
+            get_bounding_box(paired_top_masks),
+        ]
+    )
+    if len(bb_masks) == 0:
+        # Both planes segmented to nothing, so the grid search has no signal to
+        # minimise and returns alpha=beta=0 (i.e. no unmixing at all). Loud,
+        # because a silently uncorrected epoch drags the averaged coefficients
+        # toward zero.
+        logger.warning(
+            "No ROIs survived filtering for %s epoch %s; this epoch "
+            "contributes alpha=beta=0 to the averaged coefficients.",
+            oeid,
+            start_frame,
+        )
+
+    # Raw mutual information per ROI, used to normalise the grid search.
     mi_raw = np.zeros(len(bb_masks))
     for bi, mask in enumerate(bb_masks):
         bb_yx = np.where(mask)
@@ -258,28 +319,27 @@ def decrosstalk_roi_image_single_pair_from_episodic_mean_fov(
             signal_mean[bb_yx], paired_mean[bb_yx]
         )
 
-    # Grid search for alpha and beta using mean normalized mutual information across ROIs
     data = np.vstack((signal_mean.ravel(), paired_mean.ravel()))
-
-    alpha_list = np.arange(0, max_grid_val + grid_interval, grid_interval)
-    beta_list = np.arange(0, max_grid_val + grid_interval, grid_interval)
+    grid = np.arange(0, max_grid_val + grid_interval, grid_interval)
     ab_pair = []
     mean_norm_mi_values = []
-    for alpha in alpha_list:
-        for beta in beta_list:
+    for alpha in grid:
+        for beta in grid:
             temp_mixing = np.array([[1 - alpha, beta], [alpha, 1 - beta]])
-            temp_unmixing = np.linalg.inv(temp_mixing)
-            temp_unmixed_data = np.dot(temp_unmixing, data)
-            temp_recon_signal = temp_unmixed_data[0, :].reshape(signal_mean.shape)
-            temp_recon_paired = temp_unmixed_data[1, :].reshape(signal_mean.shape)
+            temp_unmixed_data = np.dot(np.linalg.inv(temp_mixing), data)
+            temp_recon_signal = temp_unmixed_data[0, :].reshape(
+                signal_mean.shape
+            )
+            temp_recon_paired = temp_unmixed_data[1, :].reshape(
+                signal_mean.shape
+            )
             temp_mi = np.zeros(len(bb_masks))
             for bi, mask in enumerate(bb_masks):
                 bb_yx = np.where(mask)
                 temp_mi[bi] = skimage.metrics.normalized_mutual_information(
                     temp_recon_signal[bb_yx], temp_recon_paired[bb_yx]
                 )
-            norm_mi = temp_mi / mi_raw
-            mean_norm_mi_values.append(norm_mi.mean())
+            mean_norm_mi_values.append((temp_mi / mi_raw).mean())
             ab_pair.append([alpha, beta])
 
     alpha, beta = ab_pair[np.argmin(mean_norm_mi_values)]
@@ -287,69 +347,60 @@ def decrosstalk_roi_image_single_pair_from_episodic_mean_fov(
 
 
 def get_signal_paired_top_masks(
-    signal_mean: np.array,
-    paired_mean: np.array,
-    dendrite_diameter_um: int = 10,
-    pix_size: float = 0.78,
-    nrshiftmax: int = 5,
-    overlap_threshold: int = 0.7,
-    num_top_rois: int = 15,
-) -> Tuple[np.array, np.array]:
-    """Get top masks of 2 paired mean images
-    Apply CellPose to get the masks, then filter dendrites and border ROIs
-    Then get the top n intensity masks from both planes
+    signal_mean: np.ndarray,
+    paired_mean: np.ndarray,
+    dendrite_diameter_um: float = DEFAULT_DENDRITE_DIAMETER_UM,
+    pix_size: float = DEFAULT_PIXEL_SIZE_UM,
+    border_buffer: int = DEFAULT_ROI_BORDER_BUFFER,
+    overlap_threshold: float = DEFAULT_OVERLAP_THRESHOLD,
+    num_top_rois: int = DEFAULT_NUM_TOP_ROIS,
+    cellpose_model_type: str = "cyto",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Segment both mean images and keep the top-intensity ROIs.
 
-    There can be duplicates due to excessive crosstalk:
-    - Identify duplicate ROIs based on the overlap between the masks of the two planes
-    - Remove the one with lower rank in intensity from all ROIs in the corresponding plane
+    Cellpose masks are filtered for dendrites and border ROIs, then
+    de-duplicated: excessive crosstalk can make the same cell appear in both
+    planes, so where two masks overlap above ``overlap_threshold`` the one
+    ranking lower in intensity within its own plane is dropped.
 
-    Parameters:
-    -----------
-    signal_mean : np.array
-        mean image of the signal plane
-    paired_mean : np.array
-        mean image of the paired plane
+    Parameters
+    ----------
+    signal_mean : np.ndarray
+        Mean image of the signal plane.
+    paired_mean : np.ndarray
+        Mean image of the paired plane.
     dendrite_diameter_um : float, optional
-        diameter of dendrite in um, by default 10
+        Diameter [um] below which a mask is discarded as dendrite.
     pix_size : float, optional
-        pixel size in um, by default 0.78
-    nrshiftmax : int, optional
-        number of pixels to crop from the nonrigid motion corrected image, by default 5
-        #TODO: Get this from the suite2p parameters
+        Imaging plane pixel size [um].
+    border_buffer : int, optional
+        Border width [pixels] within which ROIs are discarded.
     overlap_threshold : float, optional
-        threshold of overlap between signal and paired masks, by default 0.7
+        IoU above which two masks are treated as the same duplicated cell.
     num_top_rois : int, optional
-        number of top ROIs to keep, by default 15
+        Number of highest-intensity ROIs retained per plane.
+    cellpose_model_type : str, optional
+        Cellpose pretrained model name.
 
-    Returns:
-    -----------
-    signal_top_masks : np.array
-        top masks of the signal plane
-    paired_top_masks : np.array
-        top masks of the paired plane
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(signal_top_masks, paired_top_masks)``.
     """
-
-    model = cp_models.Cellpose(gpu=False, model_type="cyto")
-    signal_masks, _, _, _ = model.eval(signal_mean, diameter=None, channels=[0, 0])
-
+    model = cp_models.Cellpose(gpu=False, model_type=cellpose_model_type)
     dendrite_diameter_px = dendrite_diameter_um / pix_size
-    signal_masks_dendrite_filtered = filter_dendrite(
-        signal_masks, dendrite_diameter_pix=dendrite_diameter_px
-    )
-    signal_masks_filtered = filter_border_roi(
-        signal_masks_dendrite_filtered, buffer_pix=nrshiftmax
-    )
 
-    paired_masks, _, _, _ = model.eval(paired_mean, diameter=None, channels=[0, 0])
-    paired_masks_dendrite_filtered = filter_dendrite(
-        paired_masks, dendrite_diameter_pix=dendrite_diameter_px
-    )
-    paired_masks_filtered = filter_border_roi(
-        paired_masks_dendrite_filtered, buffer_pix=nrshiftmax
-    )
+    def _masks(image: np.ndarray) -> np.ndarray:
+        """Segment one mean image and filter dendrites and border ROIs."""
+        masks, _, _, _ = model.eval(image, diameter=None, channels=[0, 0])
+        masks = filter_dendrite(
+            masks, dendrite_diameter_pix=dendrite_diameter_px
+        )
+        masks = filter_border_roi(masks, buffer_pix=border_buffer)
+        return reorder_mask(masks)
 
-    signal_masks_filtered = reorder_mask(signal_masks_filtered)
-    paired_masks_filtered = reorder_mask(paired_masks_filtered)
+    signal_masks_filtered = _masks(signal_mean)
+    paired_masks_filtered = _masks(paired_mean)
 
     num_signal_masks = np.max(signal_masks_filtered)
     num_paired_masks = np.max(paired_masks_filtered)
@@ -358,24 +409,24 @@ def get_signal_paired_top_masks(
         for j in range(1, num_paired_masks + 1):
             overlap_matrix[i - 1, j - 1] = np.sum(
                 (signal_masks_filtered == i) & (paired_masks_filtered == j)
-            ) / np.sum((signal_masks_filtered == i) | (paired_masks_filtered == j))
+            ) / np.sum(
+                (signal_masks_filtered == i) | (paired_masks_filtered == j)
+            )
 
     signal_ranks, _ = get_ranks_roi_inds(signal_mean, signal_masks_filtered)
     paired_ranks, _ = get_ranks_roi_inds(paired_mean, paired_masks_filtered)
 
     signal_masks_overlap_filtered = signal_masks_filtered.copy()
     paired_masks_overlap_filtered = paired_masks_filtered.copy()
-    # remove lower rank overlaps
-    for si, pi in zip(
-        np.where(overlap_matrix > overlap_threshold)[0],
-        np.where(overlap_matrix > overlap_threshold)[1],
-    ):
-        rank_signal = signal_ranks[si]
-        rank_paired = paired_ranks[pi]
-        if rank_signal < rank_paired:
-            paired_masks_overlap_filtered[paired_masks_overlap_filtered == pi + 1] = 0
+    for si, pi in zip(*np.where(overlap_matrix > overlap_threshold)):
+        if signal_ranks[si] < paired_ranks[pi]:
+            paired_masks_overlap_filtered[
+                paired_masks_overlap_filtered == pi + 1
+            ] = 0
         else:
-            signal_masks_overlap_filtered[signal_masks_overlap_filtered == si + 1] = 0
+            signal_masks_overlap_filtered[
+                signal_masks_overlap_filtered == si + 1
+            ] = 0
 
     signal_top_masks = get_top_intensity_mask(
         signal_mean, signal_masks_overlap_filtered, num_top_rois=num_top_rois
@@ -387,43 +438,51 @@ def get_signal_paired_top_masks(
 
 
 def filter_dendrite(
-    masks: np.array, dendrite_diameter_pix: float = (10 / 0.78)
-) -> np.array:
-    """Filter dendrites from masks based on area threshold
+    masks: np.ndarray,
+    dendrite_diameter_pix: float = (
+        DEFAULT_DENDRITE_DIAMETER_UM / DEFAULT_PIXEL_SIZE_UM
+    ),
+) -> np.ndarray:
+    """Discard masks smaller than a dendrite-sized disc.
 
-    Input Parameters
-    ----------------
-    masks: 2d array, each ROI has a unique integer value
-    dendrite_diameter_pix: float, diameter of dendrite in pix
+    Parameters
+    ----------
+    masks : np.ndarray
+        2D mask image; each ROI has a unique integer value.
+    dendrite_diameter_pix : float, optional
+        Dendrite diameter [pixels].
 
     Returns
     -------
-    filtered_mask: 2d array, after filtering
-        Note - the filtered mask is not necessarily contiguous
+    np.ndarray
+        The mask image with sub-threshold ROIs zeroed. Remaining ROI ids are
+        not renumbered (see :func:`reorder_mask`).
     """
-    dendrite_radius = dendrite_diameter_pix / 2
-    area_threshold = np.pi * dendrite_radius**2
-    num_roi = np.max(masks)
+    area_threshold = np.pi * (dendrite_diameter_pix / 2) ** 2
     filtered_mask = masks.copy()
-    for roi_id in range(1, num_roi + 1):
+    for roi_id in range(1, np.max(masks) + 1):
         roi_mask = masks == roi_id
-        roi_area = np.sum(roi_mask)
-        if roi_area < area_threshold:
+        if np.sum(roi_mask) < area_threshold:
             filtered_mask[roi_mask] = 0
     return filtered_mask
 
 
-def filter_border_roi(masks: np.array, buffer_pix: int = 5) -> np.array:
-    """Filter ROIs that are too close to the border of the FOV
+def filter_border_roi(
+    masks: np.ndarray, buffer_pix: int = DEFAULT_ROI_BORDER_BUFFER
+) -> np.ndarray:
+    """Discard masks touching a border band of the FOV.
 
-    Input Parameters
-    ----------------
-    masks: 2d array, each ROI has a unique integer value
-    border_width_pix: int, width of border in pix
+    Parameters
+    ----------
+    masks : np.ndarray
+        2D mask image; each ROI has a unique integer value.
+    buffer_pix : int, optional
+        Border band width [pixels].
 
     Returns
     -------
-    filtered_mask: 2d array, after filtering
+    np.ndarray
+        The mask image with border-touching ROIs zeroed.
     """
     border_mask = np.zeros(masks.shape, dtype=bool)
     border_mask[:buffer_pix, :] = 1
@@ -432,212 +491,220 @@ def filter_border_roi(masks: np.array, buffer_pix: int = 5) -> np.array:
     border_mask[:, -buffer_pix:] = 1
 
     filtered_mask = masks.copy()
-    num_roi = np.max(masks)
-    for roi_id in range(1, num_roi + 1):
+    for roi_id in range(1, np.max(masks) + 1):
         roi_mask = masks == roi_id
         if np.any(roi_mask & border_mask):
             filtered_mask[roi_mask] = 0
-
     return filtered_mask
 
 
 def get_top_intensity_mask(
-    img: np.array, mask: np.array, num_top_rois: int = 15
-) -> np.array:
-    """Get top intensity mask
+    img: np.ndarray, mask: np.ndarray, num_top_rois: int = DEFAULT_NUM_TOP_ROIS
+) -> np.ndarray:
+    """Keep only the ``num_top_rois`` brightest ROIs.
 
-    Parameters:
-    -----------
-    img : np.array
-        the image to calculate mean intensity of the ROIs from
-    mask : np.array
-        ROI mask
+    Parameters
+    ----------
+    img : np.ndarray
+        Image whose per-ROI mean intensity ranks the ROIs.
+    mask : np.ndarray
+        2D ROI mask image.
     num_top_rois : int, optional
-        number of top ROIs to keep, by default 15
+        Number of ROIs to keep. When the mask holds fewer, it is returned
+        unchanged.
 
-    Returns:
-    -----------
-    top_mask : np.array
-        top num_top_rois masks (in 2D) based on the intensity of img
+    Returns
+    -------
+    np.ndarray
+        The mask image with all but the brightest ROIs zeroed.
     """
     roi_inds = np.setdiff1d(np.unique(mask), 0)
-    num_roi = len(roi_inds)
-    if num_roi < num_top_rois:
+    if len(roi_inds) < num_top_rois:
         return mask
-    else:
-        mean_intensities = [img[mask == i].mean() for i in roi_inds]
-        sorted_inds = np.argsort(mean_intensities)[::-1]
-        top_inds = sorted_inds[:num_top_rois]
-        top_ids = roi_inds[top_inds]
-
-        top_mask = mask.copy()
-        for i in roi_inds:
-            if i not in top_ids:
-                top_mask[mask == i] = 0
-        return top_mask
+    mean_intensities = [img[mask == i].mean() for i in roi_inds]
+    top_ids = roi_inds[np.argsort(mean_intensities)[::-1][:num_top_rois]]
+    top_mask = mask.copy()
+    for i in roi_inds:
+        if i not in top_ids:
+            top_mask[mask == i] = 0
+    return top_mask
 
 
-def get_ranks_roi_inds(img: np.array, mask: np.array) -> Tuple[np.array, np.array]:
-    """Get ranks and ROI indices based on the intensity of img
-    For each ROI ID in the mask
+def get_ranks_roi_inds(
+    img: np.ndarray, mask: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Rank a mask's ROIs by mean intensity, brightest first.
 
-    Parameters:
-    -----------
-    img : np.array (2D)
-        the image to calculate mean intensity of the ROIs from
-    mask : np.array
-        ROI mask (2D from CellPose)
+    Parameters
+    ----------
+    img : np.ndarray
+        2D image whose per-ROI mean intensity is ranked.
+    mask : np.ndarray
+        2D ROI mask image.
 
-    Returns:
-    -----------
-    ranks : np.array
-        ranks of the ROIs based on the intensity of img
-    roi_inds : np.array
-        ROI indices
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(ranks, roi_inds)``; ``ranks[k]`` is the 0-based rank of
+        ``roi_inds[k]`` (0 = brightest).
     """
     roi_inds = np.setdiff1d(np.unique(mask), 0)
     mean_intensities = np.array([img[mask == i].mean() for i in roi_inds])
     ranks = np.zeros_like(mean_intensities)
-    ranks[np.argsort(mean_intensities)[::-1]] = np.arange(len(mean_intensities))
+    ranks[np.argsort(mean_intensities)[::-1]] = np.arange(
+        len(mean_intensities)
+    )
     return ranks, roi_inds
 
 
-def reorder_mask(mask: np.array) -> np.array:
-    """Reorder mask IDs to have 1 to N IDs
-    N = number of ROIs
-    Need to run this after filtering dendrites and border ROIs (for convenience)
+def reorder_mask(mask: np.ndarray) -> np.ndarray:
+    """Renumber a mask's ROI ids to a contiguous ``1..N``.
 
-    Parameters:
-    -----------
-    mask : np.array
-        ROI mask (2D from CellPose)
+    Run this after filtering, so downstream loops over ``range(1, max+1)``
+    visit every surviving ROI.
 
-    Returns:
-    -----------
-    mask_reordered : np.array
-        reordered mask
+    Parameters
+    ----------
+    mask : np.ndarray
+        2D ROI mask image with possibly non-contiguous ids.
+
+    Returns
+    -------
+    np.ndarray
+        The renumbered mask image.
     """
     mask_reordered = np.zeros_like(mask)
-    roi_inds = np.setdiff1d(np.unique(mask), 0)
-    for i, ind in enumerate(roi_inds):
+    for i, ind in enumerate(np.setdiff1d(np.unique(mask), 0)):
         mask_reordered[mask == ind] = i + 1
     return mask_reordered
 
 
-def get_bounding_box(masks: np.array, area_extension_factor: int = 2) -> np.array:
-    """Get bounding box of ROI masks
+def get_bounding_box(
+    masks: np.ndarray, area_extension_factor: float = 2
+) -> np.ndarray:
+    """Expand each ROI to a rectangular bounding box.
 
-    Parameters:
-    -----------
-    masks : np.array
-        ROI masks (2D, from CellPose)
+    The mutual-information comparison uses boxes rather than the tight masks
+    so that surrounding background is included, which is what makes the
+    crosstalk visible.
+
+    Parameters
+    ----------
+    masks : np.ndarray
+        2D ROI mask image.
     area_extension_factor : float, optional
-        factor to extend the bounding box, by default 2
-        Roughly the area of the bounding box will be larger than that of the ROI by this factor
-        Assuming circular ROI.
+        Approximate factor by which each box's area exceeds its ROI's,
+        assuming a circular ROI.
 
-    Returns:
-    -----------
-    bb_masks : np.array
-        bounding box masks (3D, allowing overlaps)
+    Returns
+    -------
+    np.ndarray
+        3D stack of one box mask per ROI (boxes may overlap).
     """
-
     bb_extension = np.sqrt(area_extension_factor * np.pi / 4)
     mask_inds = np.setdiff1d(np.unique(masks), 0)
 
     bb_masks = np.zeros((len(mask_inds), *masks.shape), dtype=np.uint16)
     for i, mask_i in enumerate(mask_inds):
         y, x = np.where(masks == mask_i)
-        bb_y_tight = [y.min(), y.max()]
-        bb_x_tight = [x.min(), x.max()]
-        bb_y_tight_len = bb_y_tight[1] - bb_y_tight[0]
-        bb_x_tight_len = bb_x_tight[1] - bb_x_tight[0]
-        bb_y = [
-            max(0, int(np.round(bb_y_tight[0] - bb_extension * bb_y_tight_len / 2))),
-            min(
-                masks.shape[0],
-                int(np.round(bb_y_tight[1] + bb_extension * bb_y_tight_len / 2)),
-            ),
-        ]
-        bb_x = [
-            max(0, int(np.round(bb_x_tight[0] - bb_extension * bb_x_tight_len / 2))),
-            min(
-                masks.shape[1],
-                int(np.round(bb_x_tight[1] + bb_extension * bb_x_tight_len / 2)),
-            ),
-        ]
+        bb_y = _extend_bounds(y.min(), y.max(), bb_extension, masks.shape[0])
+        bb_x = _extend_bounds(x.min(), x.max(), bb_extension, masks.shape[1])
         bb_masks[i, bb_y[0] : bb_y[1], bb_x[0] : bb_x[1]] = mask_i
     return bb_masks
 
 
+def _extend_bounds(
+    low: int, high: int, extension: float, limit: int
+) -> List[int]:
+    """Symmetrically extend a tight ``[low, high]`` span, clipped to ``limit``.
+
+    Parameters
+    ----------
+    low, high : int
+        Tight bounds along one axis.
+    extension : float
+        Fraction of the tight span added to each side.
+    limit : int
+        Exclusive upper bound of the axis.
+
+    Returns
+    -------
+    list of int
+        The extended ``[start, end]`` indices.
+    """
+    span = high - low
+    return [
+        max(0, int(np.round(low - extension * span / 2))),
+        min(limit, int(np.round(high + extension * span / 2))),
+    ]
+
+
 def apply_mixing_matrix(
-    alpha: float, beta: float, signal_mean: np.array, paired_mean: np.array
-) -> Tuple[np.array, np.array]:
-    """Apply mixing matrix to the mean images to get reconstructed images
+    alpha: float,
+    beta: float,
+    signal_mean: np.ndarray,
+    paired_mean: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Unmix a signal/paired image pair with the fitted coefficients.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     alpha : float
-        alpha value of the unmixing matrix
+        Fraction of the signal plane leaking into the paired plane.
     beta : float
-        beta value of the unmixing matrix
-    signal_mean : np.array
-        mean image of the signal plane
-    paired_mean : np.array
-        mean image of the paired plane
+        Fraction of the paired plane leaking into the signal plane.
+    signal_mean : np.ndarray
+        Image of the signal plane.
+    paired_mean : np.ndarray
+        Image of the paired plane.
 
-    Returns:
-    -----------
-    recon_signal : np.array
-        reconstructed signal image
-    recon_paired : np.array
-        reconstructed paired image
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(recon_signal, recon_paired)``.
     """
     mixing_mat = [[1 - alpha, beta], [alpha, 1 - beta]]
     unmixing_mat = np.linalg.inv(mixing_mat)
     raw_data = np.vstack([signal_mean.ravel(), paired_mean.ravel()])
     recon_data = np.dot(unmixing_mat, raw_data)
-    recon_signal = recon_data[0, :].reshape(signal_mean.shape)
-    recon_paired = recon_data[1, :].reshape(paired_mean.shape)
-    return recon_signal, recon_paired
+    return (
+        recon_data[0, :].reshape(signal_mean.shape),
+        recon_data[1, :].reshape(paired_mean.shape),
+    )
 
 
 def draw_masks_on_image(
-    img: np.array,
-    masks: np.array,
-    ax: matplotlib.axes.Axes = None,
+    img: np.ndarray,
+    masks: np.ndarray,
+    ax: Optional[Axes] = None,
     color: str = "r",
     linewidth: int = 1,
-) -> Tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]:
-    """Draw masks on image
+) -> Optional[Tuple[Figure, Axes]]:
+    """Overlay ROI contours on an image, for interactive inspection.
 
-    Parameters:
-    -----------
-    img : np.array
-        image
-    masks : np.array
-        masks (2D)
+    Parameters
+    ----------
+    img : np.ndarray
+        2D background image.
+    masks : np.ndarray
+        2D ROI mask image.
     ax : matplotlib.axes.Axes, optional
-        axes to draw on, by default None
+        Axes to draw on; a new figure is created when omitted.
     color : str, optional
-        color of the contour, by default 'r'
+        Contour colour.
     linewidth : int, optional
-        linewidth of the contour, by default 1
+        Contour line width.
 
-    Returns: Only if ax was not provided
-    -----------
-    fig : matplotlib.figure.Figure
-        figure
-    ax : matplotlib.axes.Axes
-        axes
+    Returns
+    -------
+    tuple or None
+        ``(fig, ax)`` when this call created the figure, else ``None``.
     """
-    if ax is None:
+    created = ax is None
+    if created:
         fig, ax = plt.subplots(figsize=(10, 10))
     ax.imshow(img, cmap="gray")
-
-    num_roi = np.max(masks)
-    for i in range(1, num_roi + 1):
+    for i in range(1, np.max(masks) + 1):
         ax.contour(masks == i, colors=color, linewidths=linewidth)
     ax.axis("off")
-    if "fig" in locals():
-        return fig, ax
+    return (fig, ax) if created else None
