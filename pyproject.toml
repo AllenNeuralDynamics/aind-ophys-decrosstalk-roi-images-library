@@ -23,7 +23,7 @@ dependencies = [
     "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.3.1",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     "aind-ophys-utils==0.2.0",
-    "cellpose==2.2.3",
+    "cellpose==4.2.1.1",
     "suite2p==0.14.3",
     "numpy==1.26.4",
     "pandas==2.3.3",
