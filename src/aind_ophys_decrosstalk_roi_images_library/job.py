@@ -37,18 +37,98 @@ from .utils import metadata_utils as mu
 logger = logging.getLogger("Paired plane decrosstalk")
 
 PROCESS_NAME = "aind-ophys-decrosstalk-roi-images"
+PAIR_FILE_GLOB = "pair*.txt"
 PAIR_GLOB = "pair*/*"
 MOTION_CORRECTION_DIR = "motion_correction"
 DECROSSTALK_DIR = "decrosstalk"
 
 
+def _plane_name(entry: str, input_dir: Path) -> Optional[str]:
+    """Return the plane directory name a pair-file entry refers to.
+
+    Parameters
+    ----------
+    entry : str
+        A stripped pair-file line.
+    input_dir : Path
+        Directory holding one directory per plane.
+
+    Returns
+    -------
+    str or None
+        The plane name, or ``None`` when the entry is a nested or relative
+        path, ``.`` or ``..``, or an absolute path outside ``input_dir``.
+    """
+    path = Path(entry)
+    if path.is_absolute():
+        if path.parent.resolve() != input_dir.resolve():
+            return None
+        entry = path.name
+    if entry in ("", ".", "..") or "/" in entry:
+        return None
+    return entry
+
+
+def _read_pair_file(pair_file: Path, input_dir: Path) -> Tuple[str, str]:
+    """Read the two plane names a pair file lists.
+
+    Parameters
+    ----------
+    pair_file : Path
+        One plane per line, as its directory name or as the absolute path of
+        a directory directly under ``input_dir``. Blank lines are ignored.
+    input_dir : Path
+        Directory holding one directory per plane.
+
+    Returns
+    -------
+    tuple of str
+        The two plane names, sorted.
+
+    Raises
+    ------
+    ValueError
+        If an entry is neither a plane name nor a directory directly under
+        ``input_dir``, or the file does not list exactly two distinct planes.
+    FileNotFoundError
+        If a listed plane has no directory under ``input_dir``.
+    """
+    names: List[str] = []
+    for line in pair_file.read_text(encoding="utf-8").splitlines():
+        entry = line.strip()
+        if not entry:
+            continue
+        name = _plane_name(entry, input_dir)
+        if name is None:
+            raise ValueError(
+                f"Unsupported entry {entry!r} in {pair_file}: expected a "
+                f"plane directory name or a directory directly under "
+                f"{input_dir}."
+            )
+        names.append(name)
+    if len(names) != 2 or names[0] == names[1]:
+        raise ValueError(
+            f"Expected exactly 2 distinct plane names in {pair_file}, "
+            f"found {names}."
+        )
+    for name in names:
+        if not (input_dir / name).is_dir():
+            raise FileNotFoundError(
+                f"Plane directory {input_dir / name} listed in {pair_file} "
+                f"does not exist."
+            )
+    first, second = sorted(names)
+    return first, second
+
+
 def _locate_pair(input_dir: Path) -> Tuple[Path, Tuple[str, str]]:
     """Resolve the plane pair staged under ``input_dir``.
 
-    The upstream ``decrosstalk_split_json`` step writes one ``pair*.txt``
-    per plane pair; the thin runtime wrapper's ``code/run`` turns it into a
-    ``pair*/``
-    directory holding one symlink per plane.
+    The pair is named by the ``pair*.txt`` file directly under ``input_dir``:
+    one plane per line, as its directory name or as the absolute path of a
+    directory directly under ``input_dir``, blank lines ignored. Each plane's
+    directory is ``input_dir/<plane>``. Without a pair file, the pair is the
+    two plane directories matching ``pair*/*``.
 
     Parameters
     ----------
@@ -58,20 +138,34 @@ def _locate_pair(input_dir: Path) -> Tuple[Path, Tuple[str, str]]:
     Returns
     -------
     tuple
-        ``(pair_dir, (oeid, paired_oeid))``.
+        ``(pair_dir, (oeid, paired_oeid))``: the directory holding both plane
+        directories, which is ``input_dir`` itself when a pair file names the
+        planes, and the two plane ids, sorted.
 
     Raises
     ------
+    ValueError
+        If more than one pair file is present, or the pair file is malformed.
     FileNotFoundError
-        If no ``pair*/`` directory with exactly two planes is present.
+        If a plane the pair file lists has no directory, or there is no pair
+        file and no ``pair*/`` directory holds exactly two planes.
     """
+    pair_files = sorted(input_dir.glob(PAIR_FILE_GLOB))
+    if len(pair_files) > 1:
+        raise ValueError(
+            f"Expected at most 1 pair file matching '{PAIR_FILE_GLOB}' under "
+            f"{input_dir}, found {[str(p) for p in pair_files]}."
+        )
+    if pair_files:
+        return input_dir, _read_pair_file(pair_files[0], input_dir)
+
     plane_dirs = sorted(p for p in input_dir.glob(PAIR_GLOB) if p.is_dir())
     if len(plane_dirs) != 2:
         raise FileNotFoundError(
-            f"Expected exactly 2 plane directories matching "
-            f"'{PAIR_GLOB}' under {input_dir}, found "
-            f"{[str(p) for p in plane_dirs]}. The upstream pair split must "
-            f"run first."
+            f"No pair file matching '{PAIR_FILE_GLOB}' under {input_dir}, "
+            f"and expected exactly 2 plane directories matching "
+            f"'{PAIR_GLOB}', found {[str(p) for p in plane_dirs]}. The "
+            f"upstream pair split must run first."
         )
     return plane_dirs[0].parent, (plane_dirs[0].name, plane_dirs[1].name)
 
