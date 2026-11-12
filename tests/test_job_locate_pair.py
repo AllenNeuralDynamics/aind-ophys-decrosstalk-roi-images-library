@@ -49,9 +49,13 @@ class TestLocatePairFile(StagedInput):
         self.assertEqual(pair_dir, self.input_dir)
         self.assertEqual(planes, NAME_ORDER)
 
-    def test_data_prefixed_entries_name_the_same_planes(self) -> None:
-        """A leading ``/data/`` on an entry is dropped."""
-        self.write_pair_file("/data/VISp_0\n/data/VISl_4\n")
+    def test_absolute_entries_under_the_input_dir_name_the_same_planes(
+        self,
+    ) -> None:
+        """An absolute path directly under ``input_dir`` names its plane."""
+        first = self.input_dir / "VISp_0"
+        second = self.input_dir.resolve() / "VISl_4"
+        self.write_pair_file(f"{first}\n{second}\n")
 
         self.assertEqual(
             job._locate_pair(self.input_dir), (self.input_dir, NAME_ORDER)
@@ -59,7 +63,7 @@ class TestLocatePairFile(StagedInput):
 
     def test_blank_lines_and_surrounding_whitespace_are_ignored(self) -> None:
         """Blank, whitespace-only and CRLF-terminated lines are tolerated."""
-        self.write_pair_file("\n  VISp_0  \r\n\n\t\n/data/VISl_4\n\n")
+        self.write_pair_file("\n  VISp_0  \r\n\n\t\nVISl_4\n\n")
 
         self.assertEqual(
             job._locate_pair(self.input_dir), (self.input_dir, NAME_ORDER)
@@ -71,7 +75,7 @@ class TestLocatePairFile(StagedInput):
             "empty": "",
             "one plane": "VISp_0\n",
             "three planes": f"VISp_0\nVISl_4\n{OTHER_PLANE}\n",
-            "one plane twice": "VISp_0\n/data/VISp_0\n",
+            "one plane twice": f"VISp_0\n{self.input_dir / 'VISp_0'}\n",
         }
         for label, text in cases.items():
             with self.subTest(label):
@@ -92,10 +96,8 @@ class TestLocatePairFile(StagedInput):
                 self.assertIn(PAIR_FILE, str(ctx.exception))
                 self.assertIn(str(self.input_dir / plane), str(ctx.exception))
 
-    def test_absolute_path_other_than_the_data_prefix_is_rejected(
-        self,
-    ) -> None:
-        """Only ``/data/<plane>`` may be absolute."""
+    def test_absolute_path_outside_the_input_dir_is_rejected(self) -> None:
+        """An absolute path must be a directory directly under input_dir."""
         self.write_pair_file("VISp_0\n/mnt/staging/VISl_4\n")
 
         with self.assertRaises(ValueError) as ctx:
@@ -109,9 +111,9 @@ class TestLocatePairFile(StagedInput):
         for entry in (
             "..",
             ".",
-            "/data/",
+            "/data/VISl_4",
             "VISl_4/motion_correction",
-            "/data/VISl_4/",
+            str(self.input_dir / "VISl_4" / "motion_correction"),
         ):
             with self.subTest(entry):
                 self.write_pair_file(f"VISp_0\n{entry}\n")

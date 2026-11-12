@@ -22,7 +22,8 @@ minimising the normalised mutual information between the two planes'
 reconstructed ROI images, averaged, and applied to the full movie.
 
 Unlike the single-plane capsules, one invocation processes **two** planes - the
-pair named by the `../data/pair*.txt` file, one plane directory name per line -
+pair named by the `pair*.txt` file in the input directory, one plane directory
+name per line -
 and writes a full set of outputs, including its own `processing.json` and
 `quality_control.json`, into each plane's own output directory. Without a pair
 file, a staged `../data/pair*/` directory holding the two plane directories is

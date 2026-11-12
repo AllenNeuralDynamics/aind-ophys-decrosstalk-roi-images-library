@@ -39,9 +39,34 @@ logger = logging.getLogger("Paired plane decrosstalk")
 PROCESS_NAME = "aind-ophys-decrosstalk-roi-images"
 PAIR_FILE_GLOB = "pair*.txt"
 PAIR_GLOB = "pair*/*"
-DATA_PREFIX = "/data/"
 MOTION_CORRECTION_DIR = "motion_correction"
 DECROSSTALK_DIR = "decrosstalk"
+
+
+def _plane_name(entry: str, input_dir: Path) -> Optional[str]:
+    """Return the plane directory name a pair-file entry refers to.
+
+    Parameters
+    ----------
+    entry : str
+        A stripped pair-file line.
+    input_dir : Path
+        Directory holding one directory per plane.
+
+    Returns
+    -------
+    str or None
+        The plane name, or ``None`` when the entry is a nested or relative
+        path, ``.`` or ``..``, or an absolute path outside ``input_dir``.
+    """
+    path = Path(entry)
+    if path.is_absolute():
+        if path.parent.resolve() != input_dir.resolve():
+            return None
+        entry = path.name
+    if entry in ("", ".", "..") or "/" in entry:
+        return None
+    return entry
 
 
 def _read_pair_file(pair_file: Path, input_dir: Path) -> Tuple[str, str]:
@@ -50,8 +75,8 @@ def _read_pair_file(pair_file: Path, input_dir: Path) -> Tuple[str, str]:
     Parameters
     ----------
     pair_file : Path
-        One plane name per line, each optionally prefixed with ``/data/``.
-        Blank lines are ignored.
+        One plane per line, as its directory name or as the absolute path of
+        a directory directly under ``input_dir``. Blank lines are ignored.
     input_dir : Path
         Directory holding one directory per plane.
 
@@ -63,8 +88,8 @@ def _read_pair_file(pair_file: Path, input_dir: Path) -> Tuple[str, str]:
     Raises
     ------
     ValueError
-        If an entry is neither a plane name nor ``/data/<plane>``, or the file
-        does not list exactly two distinct planes.
+        If an entry is neither a plane name nor a directory directly under
+        ``input_dir``, or the file does not list exactly two distinct planes.
     FileNotFoundError
         If a listed plane has no directory under ``input_dir``.
     """
@@ -73,11 +98,12 @@ def _read_pair_file(pair_file: Path, input_dir: Path) -> Tuple[str, str]:
         entry = line.strip()
         if not entry:
             continue
-        name = entry.removeprefix(DATA_PREFIX)
-        if name in ("", ".", "..") or "/" in name:
+        name = _plane_name(entry, input_dir)
+        if name is None:
             raise ValueError(
                 f"Unsupported entry {entry!r} in {pair_file}: expected a "
-                f"plane name, optionally prefixed with '{DATA_PREFIX}'."
+                f"plane directory name or a directory directly under "
+                f"{input_dir}."
             )
         names.append(name)
     if len(names) != 2 or names[0] == names[1]:
@@ -99,9 +125,10 @@ def _locate_pair(input_dir: Path) -> Tuple[Path, Tuple[str, str]]:
     """Resolve the plane pair staged under ``input_dir``.
 
     The pair is named by the ``pair*.txt`` file directly under ``input_dir``:
-    one plane name per line, each optionally prefixed with ``/data/``, blank
-    lines ignored. Each plane's directory is ``input_dir/<plane>``. Without a
-    pair file, the pair is the two plane directories matching ``pair*/*``.
+    one plane per line, as its directory name or as the absolute path of a
+    directory directly under ``input_dir``, blank lines ignored. Each plane's
+    directory is ``input_dir/<plane>``. Without a pair file, the pair is the
+    two plane directories matching ``pair*/*``.
 
     Parameters
     ----------
